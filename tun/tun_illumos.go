@@ -2,6 +2,7 @@
  *
  * Copyright 2019 Joyent, Inc.
  */
+
 // +build illumos,amd64
 
 package tun
@@ -13,7 +14,6 @@ import (
 	"syscall"
 
 	"os"
-//	"os/exec"
 	"golang.org/x/sys/unix"
 )
 
@@ -103,10 +103,7 @@ func getmsg(fd int, ctlptr uintptr, dataptr uintptr, flagsp uintptr) (
 }
 
 
-/*
- * WIREGUARD/TUN INTERFACE
- */
-
+// NativeTun is the OS-specific implementation of a tun interface.
 type NativeTun struct {
 	tunFile *os.File	/* TUN device file */
 	ip_fd int		/* IP device fd */
@@ -117,51 +114,48 @@ type NativeTun struct {
 	errors chan error
 }
 
-// type Device interface {
-// 	File() *os.File                 // returns the file descriptor of the device
-// 	Read([]byte, int) (int, error)  // read a packet from the device (without any additional headers)
-// 	Write([]byte, int) (int, error) // writes a packet to the device (without any additional headers)
-// 	MTU() (int, error)              // returns the MTU of the device
-// 	Name() (string, error)          // fetches and returns the current name
-// 	Events() chan Event          // returns a constant channel of events related to the device
-// 	Close() error                   // stops the device and closes the event channel
-// }
-
+// Name implements the Device interface
 func (tun *NativeTun) Name() (string, error) {
 	return tun.name, nil
 }
 
+// Flush implements the Device interface XXX(nshalman is this true?)
 func (tun *NativeTun) Flush() error {
         // TODO: can flushing be implemented by buffering and using sendmmsg?
         return nil
 }
 
+// Read implements the Device interface
 func (tun *NativeTun) Read(buf []byte, offset int) (int, error) {
 	select {
 	case err := <-tun.errors:
 		return 0, err
-
 	default:
 		return tun.read_tun(buf[offset:])
 	}
 }
 
+// Write implements the Device interface
 func (tun *NativeTun) Write(buf []byte, offset int) (int, error) {
 	return tun.write_tun(buf[offset:])
 }
 
+// File implements the Device interface
 func (tun *NativeTun) File() *os.File {
 	return tun.tunFile
 }
 
+// MTU implements the Device interface
 func (tun *NativeTun) MTU() (int, error) {
 	return tun.mtu, nil
 }
 
+// Events implements the Device interface
 func (tun *NativeTun) Events() chan Event {
 	return tun.events
 }
 
+// Close implements the Device interface
 func (tun *NativeTun) Close() error {
 	if tun.ip_fd >= 0 {
 		ip_muxid, err := get_ip_muxid(tun.ip_fd, tun.name)
@@ -247,7 +241,6 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	}
 
 	name = fmt.Sprintf("tun%d", ppa)
-	fmt.Printf("device %v\n", name)
 
 	/*
 	 * Open another temporary file descriptor to the TUN driver.
@@ -348,8 +341,6 @@ func get_ip_muxid(fd int, name string) (int, error) {
 	/* ip_muxid = ifr.lifr_ip_muxid */
 	var ip_muxid int = int(*(*int32)(unsafe.Pointer(&ifr[40 + 4 * 0])))
 
-	fmt.Printf("got ip_muxid %v\n", ip_muxid)
-
 	return ip_muxid, nil
 }
 
@@ -394,8 +385,6 @@ func plink(fd int, other_fd int) (int, error) {
 		return -1, fmt.Errorf("could not I_PLINK: %v", err)
 	}
 
-	fmt.Printf("ip_muxid %v\n", ip_muxid)
-
 	return ip_muxid, nil
 }
 
@@ -414,7 +403,6 @@ func unit_select(fd int, ppa int) (error) {
 func push_ip(fd int) (error) {
 	/*
 	 * We need a C string with the value "ip".
-	 * XXX Is a Golang "string" implicitly NUL-terminated?
 	 */
 	modname := []byte{ 'i', 'p', 0 }
 

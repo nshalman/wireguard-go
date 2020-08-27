@@ -1,10 +1,10 @@
-// +build illumos
-
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2019 WireGuard LLC. All Rights Reserved.
  * Copyright 2019 Joyent, Inc.
  */
+
+// +build illumos
 
 package ipc
 
@@ -31,8 +31,6 @@ type UAPIListener struct {
 	listener net.Listener // unix socket listener
 	connNew  chan net.Conn
 	connErr  chan error
-	kqueueFd int
-	keventFd int
 }
 
 func (l *UAPIListener) Accept() (net.Conn, error) {
