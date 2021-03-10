@@ -119,7 +119,7 @@ func (tun *NativeTun) Name() (string, error) {
 	return tun.name, nil
 }
 
-// Flush implements the Device interface XXX(nshalman is this true?)
+// Flush implements the Device interface
 func (tun *NativeTun) Flush() error {
         // TODO: can flushing be implemented by buffering and using sendmmsg?
         return nil
