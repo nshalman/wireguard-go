@@ -11,28 +11,9 @@ import (
 	"fmt"
 
 	"unsafe"
-	"syscall"
 
 	"os"
 	"golang.org/x/sys/unix"
-)
-
-/*
- * ILLUMOS SYSTEM CALL HELPERS
- */
-
-//go:cgo_import_dynamic libc_ioctl ioctl "libc.so"
-//go:cgo_import_dynamic libc_putmsg putmsg "libc.so"
-//go:cgo_import_dynamic libc_getmsg getmsg "libc.so"
-
-//go:linkname f_ioctl libc_ioctl
-//go:linkname f_putmsg libc_putmsg
-//go:linkname f_getmsg libc_getmsg
-
-var (
-	f_ioctl uintptr
-	f_putmsg uintptr
-	f_getmsg uintptr
 )
 
 const (
@@ -60,49 +41,6 @@ const (
 	SIOCGLIFMUXID = 0xc0786983
 	SIOCGLIFINDEX = 0xc0786985
 )
-
-//go:linkname sysvicall6 runtime.syscall_sysvicall6
-func sysvicall6(trap, nargs, a1, a2, a3, a4, a5, a6 uintptr) (
-    r1, r2 uintptr, err syscall.Errno)
-
-func ioctl(fd int, req uint, arg uintptr) (r int, err error) {
-	r0, _, e0 := sysvicall6(uintptr(unsafe.Pointer(&f_ioctl)), 3,
-	    uintptr(fd), uintptr(req), arg, 0, 0, 0)
-
-	r = int(r0)
-	if e0 != 0 {
-		err = e0
-	}
-
-	return
-}
-
-func putmsg(fd int, ctlptr uintptr, dataptr uintptr, flags int) (
-    r int, err error) {
-	r0, _, e0 := sysvicall6(uintptr(unsafe.Pointer(&f_putmsg)), 4,
-	    uintptr(fd), ctlptr, dataptr, uintptr(flags), 0, 0)
-
-	r = int(r0)
-	if e0 != 0 {
-		err = e0
-	}
-
-	return
-}
-
-func getmsg(fd int, ctlptr uintptr, dataptr uintptr, flagsp uintptr) (
-    r int, err error) {
-	r0, _, e0 := sysvicall6(uintptr(unsafe.Pointer(&f_getmsg)), 4,
-	    uintptr(fd), ctlptr, dataptr, flagsp, 0, 0)
-
-	r = int(r0)
-	if e0 != 0 {
-		err = e0
-	}
-
-	return
-}
-
 
 // NativeTun is the OS-specific implementation of a tun interface.
 type NativeTun struct {
@@ -334,7 +272,7 @@ func get_ip_muxid(fd int, name string) (int, error) {
 		ifr[i] = anb[i]
 	}
 
-	_, err := ioctl(fd, SIOCGLIFMUXID, uintptr(unsafe.Pointer(&ifr[0])))
+	_, err := unix.Ioctl(fd, SIOCGLIFMUXID, uintptr(unsafe.Pointer(&ifr[0])))
 	if err != nil {
 		return -1, fmt.Errorf("could not SIOCSLIFMUXID: %v", err)
 	}
@@ -362,7 +300,7 @@ func set_ip_muxid(fd int, name string, ip_muxid int) (error) {
 	/* ifr.lifr_ip_muxid  = ip_muxid */
 	*(*int32)(unsafe.Pointer(&ifr[40 + 4 * 0])) = int32(ip_muxid)
 
-	_, err := ioctl(fd, SIOCSLIFMUXID, uintptr(unsafe.Pointer(&ifr[0])))
+	_, err := unix.Ioctl(fd, SIOCSLIFMUXID, uintptr(unsafe.Pointer(&ifr[0])))
 	if err != nil {
 		return fmt.Errorf("could not SIOCSLIFMUXID: %v", err)
 	}
@@ -371,7 +309,7 @@ func set_ip_muxid(fd int, name string, ip_muxid int) (error) {
 }
 
 func punlink(fd int, muxid int) (error) {
-	_, err := ioctl(fd, I_PUNLINK, uintptr(muxid))
+	_, err := unix.Ioctl(fd, I_PUNLINK, uintptr(muxid))
 	if err != nil {
 		return fmt.Errorf("could not I_PUNLINK: %v", err)
 	}
@@ -381,7 +319,7 @@ func punlink(fd int, muxid int) (error) {
 
 
 func plink(fd int, other_fd int) (int, error) {
-	ip_muxid, err := ioctl(fd, I_PLINK, uintptr(other_fd))
+	ip_muxid, err := unix.Ioctl(fd, I_PLINK, uintptr(other_fd))
 	if err != nil {
 		return -1, fmt.Errorf("could not I_PLINK: %v", err)
 	}
@@ -393,7 +331,7 @@ func unit_select(fd int, ppa int) (error) {
 	int_ppa := make([]byte, 4) /* storage for the PPA number */
 	*(*int32)(unsafe.Pointer(&int_ppa[0])) = int32(ppa)
 
-	_, err := ioctl(fd, IF_UNITSEL, uintptr(unsafe.Pointer(&int_ppa[0])))
+	_, err := unix.Ioctl(fd, IF_UNITSEL, uintptr(unsafe.Pointer(&int_ppa[0])))
 	if err != nil {
 		return fmt.Errorf("could not select unit: %v", err)
 	}
@@ -407,7 +345,7 @@ func push_ip(fd int) (error) {
 	 */
 	modname := []byte{ 'i', 'p', 0 }
 
-	_, err := ioctl(fd, I_PUSH, uintptr(unsafe.Pointer(&modname[0])))
+	_, err := unix.Ioctl(fd, I_PUSH, uintptr(unsafe.Pointer(&modname[0])))
 	if err != nil {
 		return fmt.Errorf("could not push IP module: %v\n", err)
 	}
@@ -443,7 +381,7 @@ func tun_new_ppa(fd int) (int, error) {
 		*(*uintptr)(unsafe.Pointer(&strioc[16])) = /* int ic_dp */
 		    uintptr(unsafe.Pointer(&int_ppa[0]))
 
-		new_ppa, err := ioctl(fd, I_STR, uintptr(unsafe.Pointer(&strioc[0])))
+		new_ppa, err := unix.Ioctl(fd, I_STR, uintptr(unsafe.Pointer(&strioc[0])))
 		if err == unix.EEXIST {
 			/*
 			 * This PPA appears to be in use; try the next one.
@@ -476,7 +414,7 @@ func (tun *NativeTun) read_tun(buf []byte) (int, error) {
 
 	var flags int32 = 0
 
-	_, err := getmsg(int(tun.tunFile.Fd()), uintptr(0),
+	_, err := unix.Getmsg(int(tun.tunFile.Fd()), uintptr(0),
 	    uintptr(unsafe.Pointer(&sbuf[0])),
 	    uintptr(unsafe.Pointer(&flags)))
 	if err != nil {
@@ -498,7 +436,7 @@ func (tun *NativeTun) write_tun(buf []byte) (int, error) {
 	*(*uintptr)(unsafe.Pointer(&sbuf[8])) = /* caddr_t buf */
 	    uintptr(unsafe.Pointer(&buf[0]))
 
-	_, err := putmsg(int(tun.tunFile.Fd()), uintptr(0),
+	_, err := unix.Putmsg(int(tun.tunFile.Fd()), uintptr(0),
 	    uintptr(unsafe.Pointer(&sbuf[0])), 0)
 	if err != nil {
 		return -1, fmt.Errorf("TUN write failure: %v", err)
