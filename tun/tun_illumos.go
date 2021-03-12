@@ -402,44 +402,17 @@ func tun_new_ppa(fd int) (int, error) {
  * bytes we read.
  */
 func (tun *NativeTun) read_tun(buf []byte) (int, error) {
-	// struct strbuf { /* 0x10 bytes */
-	//         int maxlen; /* offset: 0 bytes */
-	//         int len; /* offset: 4 bytes */
-	//         caddr_t buf; /* offset: 8 bytes */
-	// };
-	sbuf := make([]byte, 0x10) /* struct strbuf */
-	*(*int32)(unsafe.Pointer(&sbuf[0])) = int32(len(buf)) /* int maxlen */
-	*(*uintptr)(unsafe.Pointer(&sbuf[8])) = /* caddr_t buf */
-	    uintptr(unsafe.Pointer(&buf[0]))
-
-	var flags int32 = 0
-
-	_, err := unix.Getmsg(int(tun.tunFile.Fd()), uintptr(0),
-	    uintptr(unsafe.Pointer(&sbuf[0])),
-	    uintptr(unsafe.Pointer(&flags)))
+	_, read, _, err := unix.Getmsg(int(tun.tunFile.Fd()), nil, buf)
 	if err != nil {
-		return -1, fmt.Errorf("TUN read failure: %v", err)
+		return -1, fmt.Errorf("TUN read failure: %w", err)
 	}
 
-	return int(*(*int32)(unsafe.Pointer(&sbuf[4]))), /* int len */
-	    nil
+	return len(read), nil
 }
 
 func (tun *NativeTun) write_tun(buf []byte) (int, error) {
-	// struct strbuf { /* 0x10 bytes */
-	//         int maxlen; /* offset: 0 bytes */
-	//         int len; /* offset: 4 bytes */
-	//         caddr_t buf; /* offset: 8 bytes */
-	// };
-	sbuf := make([]byte, 0x10) /* struct strbuf */
-	*(*int32)(unsafe.Pointer(&sbuf[4])) = int32(len(buf)) /* int len */
-	*(*uintptr)(unsafe.Pointer(&sbuf[8])) = /* caddr_t buf */
-	    uintptr(unsafe.Pointer(&buf[0]))
-
-	_, err := unix.Putmsg(int(tun.tunFile.Fd()), uintptr(0),
-	    uintptr(unsafe.Pointer(&sbuf[0])), 0)
-	if err != nil {
-		return -1, fmt.Errorf("TUN write failure: %v", err)
+	if err := unix.Putmsg(int(tun.tunFile.Fd()), nil, buf, 0); err != nil {
+		return -1, fmt.Errorf("TUN write failure: %w", err)
 	}
 
 	return len(buf), nil
