@@ -194,7 +194,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	// common x/sys/unix functions use uint. Hand-cast things to help
 	// the compiler figure it out.
 	req := int(unix.IF_UNITSEL)
-	if err = unix.IoctlSetInt(if_fd, uint(req), ppa); err != nil {
+	if err = unix.IoctlSetPointerInt(if_fd, uint(req), ppa); err != nil {
 		unix.Close(if_fd)
 		unix.Close(ip_fd)
 		tunFile.Close()
