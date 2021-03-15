@@ -24,15 +24,6 @@ const (
 	TUNSETPPA = 0x540002
 
 	/*
-	 * sys/stropts.h:
-	 */
-	I_STR = 0x5308
-	I_POP = 0x5303
-	I_PUSH = 0x5302
-	I_PLINK = 0x5316
-	I_PUNLINK = 0x5317
-
-	/*
 	 * sys/sockio.h:
 	 */
 	IF_UNITSEL = 0x80047336 /* set unit number */
@@ -211,7 +202,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, err
 	}
 
-	ip_muxid, err := plink(ip_fd, if_fd)
+	ip_muxid, err := unix.IoctlPlink(ip_fd, if_fd)
 	if err != nil {
 		unix.Close(if_fd)
 		unix.Close(ip_fd)
@@ -309,7 +300,7 @@ func set_ip_muxid(fd int, name string, ip_muxid int) (error) {
 }
 
 func punlink(fd int, muxid int) (error) {
-	_, err := unix.Ioctl(fd, I_PUNLINK, uintptr(muxid))
+	_, err := unix.Ioctl(fd, unix.I_PUNLINK, uintptr(muxid))
 	if err != nil {
 		return fmt.Errorf("could not I_PUNLINK: %v", err)
 	}
@@ -319,7 +310,7 @@ func punlink(fd int, muxid int) (error) {
 
 
 func plink(fd int, other_fd int) (int, error) {
-	ip_muxid, err := unix.Ioctl(fd, I_PLINK, uintptr(other_fd))
+	ip_muxid, err := unix.Ioctl(fd, unix.I_PLINK, uintptr(other_fd))
 	if err != nil {
 		return -1, fmt.Errorf("could not I_PLINK: %v", err)
 	}
@@ -345,7 +336,7 @@ func push_ip(fd int) (error) {
 	 */
 	modname := []byte{ 'i', 'p', 0 }
 
-	_, err := unix.Ioctl(fd, I_PUSH, uintptr(unsafe.Pointer(&modname[0])))
+	_, err := unix.Ioctl(fd, unix.I_PUSH, uintptr(unsafe.Pointer(&modname[0])))
 	if err != nil {
 		return fmt.Errorf("could not push IP module: %v\n", err)
 	}
@@ -381,7 +372,7 @@ func tun_new_ppa(fd int) (int, error) {
 		*(*uintptr)(unsafe.Pointer(&strioc[16])) = /* int ic_dp */
 		    uintptr(unsafe.Pointer(&int_ppa[0]))
 
-		new_ppa, err := unix.Ioctl(fd, I_STR, uintptr(unsafe.Pointer(&strioc[0])))
+		new_ppa, err := unix.Ioctl(fd, unix.I_STR, uintptr(unsafe.Pointer(&strioc[0])))
 		if err == unix.EEXIST {
 			/*
 			 * This PPA appears to be in use; try the next one.

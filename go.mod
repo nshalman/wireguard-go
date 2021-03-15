@@ -8,4 +8,4 @@ require (
 	golang.org/x/sys v0.0.0-20210105210732-16f7687f5001
 )
 
-replace golang.org/x/sys => github.com/nshalman/sys v0.0.0-20210312195117-ece352da6985
+replace golang.org/x/sys => /home/admin/sys
