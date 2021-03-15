@@ -10,35 +10,16 @@ package tun
 import (
 	"fmt"
 
-	"unsafe"
-
-	"os"
 	"golang.org/x/sys/unix"
-)
-
-const (
-	/*
-	 * For use with "/dev/tun":
-	 */
-	TUNNEWPPA = 0x540001
-	TUNSETPPA = 0x540002
-
-	/*
-	 * sys/sockio.h:
-	 */
-	IF_UNITSEL = 0x80047336 /* set unit number */
-
-	SIOCSLIFMUXID = 0x80786984
-	SIOCGLIFMUXID = 0xc0786983
-	SIOCGLIFINDEX = 0xc0786985
+	"os"
 )
 
 // NativeTun is the OS-specific implementation of a tun interface.
 type NativeTun struct {
-	tunFile *os.File	/* TUN device file */
-	ip_fd int		/* IP device fd */
-	name string		/* Interface name */
-	mtu int
+	tunFile *os.File /* TUN device file */
+	ip_fd   int      /* IP device fd */
+	name    string   /* Interface name */
+	mtu     int
 
 	events chan Event
 	errors chan error
@@ -51,8 +32,8 @@ func (tun *NativeTun) Name() (string, error) {
 
 // Flush implements the Device interface
 func (tun *NativeTun) Flush() error {
-        // TODO: can flushing be implemented by buffering and using sendmmsg?
-        return nil
+	// TODO: can flushing be implemented by buffering and using sendmmsg?
+	return nil
 }
 
 // Read implements the Device interface
@@ -61,13 +42,20 @@ func (tun *NativeTun) Read(buf []byte, offset int) (int, error) {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		return tun.read_tun(buf[offset:])
+		_, read, _, err := unix.Getmsg(int(tun.tunFile.Fd()), nil, buf)
+		if err != nil {
+			return 0, err
+		}
+		return len(read), nil
 	}
 }
 
 // Write implements the Device interface
 func (tun *NativeTun) Write(buf []byte, offset int) (int, error) {
-	return tun.write_tun(buf[offset:])
+	if err := unix.Putmsg(int(tun.tunFile.Fd()), nil, buf, 0); err != nil {
+		return 0, err
+	}
+	return len(buf), nil
 }
 
 // File implements the Device interface
@@ -88,13 +76,12 @@ func (tun *NativeTun) Events() chan Event {
 // Close implements the Device interface
 func (tun *NativeTun) Close() error {
 	if tun.ip_fd >= 0 {
-		ip_muxid, err := get_ip_muxid(tun.ip_fd, tun.name)
+		id, err := unix.IoctlGetIPMuxID(tun.ip_fd, tun.name)
 		if err != nil {
 			return err
 		}
 
-		err = punlink(tun.ip_fd, ip_muxid)
-		if err != nil {
+		if err = unix.IoctlPunlink(tun.ip_fd, id); err != nil {
 			return err
 		}
 
@@ -163,11 +150,19 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	/*
 	 * Ask the TUN driver for a new PPA number:
 	 */
-	ppa, err := tun_new_ppa(fd)
-	if err != nil {
-		unix.Close(ip_fd)
-		tunFile.Close()
-		return nil, err
+	var ppa int
+	for try := 0; try < 128; try++ {
+		ppa, err = unix.IoctlTunNewPPA(fd, try)
+		if err != nil {
+			if err == unix.EEXIST {
+				// PPA already in use, try the next one.
+				continue
+			}
+			unix.Close(ip_fd)
+			tunFile.Close()
+			return nil, err
+		}
+		break
 	}
 
 	name = fmt.Sprintf("tun%d", ppa)
@@ -182,27 +177,31 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		unix.Close(ip_fd)
 		tunFile.Close()
 		return nil, fmt.Errorf("Could not open second TUN (%s)",
-		    dev_node)
+			dev_node)
 	}
 
 	/*
 	 * Push the IP module onto the new TUN device.
 	 */
-	if err = push_ip(if_fd); err != nil {
+	if err = unix.IoctlSetString(if_fd, unix.I_PUSH, "ip"); err != nil {
 		unix.Close(if_fd)
 		unix.Close(ip_fd)
 		tunFile.Close()
 		return nil, err
 	}
 
-	if err = unit_select(if_fd, ppa); err != nil {
+	// Illumos defines the ioctl number as a signed int, but the
+	// common x/sys/unix functions use uint. Hand-cast things to help
+	// the compiler figure it out.
+	req := int(unix.IF_UNITSEL)
+	if err = unix.IoctlSetInt(if_fd, uint(req), ppa); err != nil {
 		unix.Close(if_fd)
 		unix.Close(ip_fd)
 		tunFile.Close()
 		return nil, err
 	}
 
-	ip_muxid, err := unix.IoctlPlink(ip_fd, if_fd)
+	muxid, err := unix.IoctlPlink(ip_fd, if_fd)
 	if err != nil {
 		unix.Close(if_fd)
 		unix.Close(ip_fd)
@@ -215,30 +214,24 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	 * because of the persistent link established above.
 	 */
 	unix.Close(if_fd)
-	if_fd = -1
 
-	if err = set_ip_muxid(ip_fd, name, ip_muxid); err != nil {
-		/*
-		 * Attempt to disconnect the IP multiplexor before we close
-		 * everything down.
-		 */
-		punlink(ip_fd, ip_muxid)
-
+	if err = unix.IoctlSetIPMuxID(ip_fd, name, muxid); err != nil {
+		unix.IoctlPunlink(ip_fd, muxid)
 		unix.Close(ip_fd)
 		tunFile.Close()
 		return nil, err
 	}
 
 	tun := &NativeTun{
-		events: make(chan Event, 10),
-		errors: make(chan error, 1),
-		mtu: mtu, /* XXX We should do something with the MTU! */
-		name: name,
+		events:  make(chan Event, 10),
+		errors:  make(chan error, 1),
+		mtu:     mtu, /* XXX We should do something with the MTU! */
+		name:    name,
 		tunFile: tunFile,
-		ip_fd: ip_fd,
+		ip_fd:   ip_fd,
 	}
 
-	defer func () {
+	defer func() {
 		/*
 		 * XXX For now, we'll just send a link up event straight away.
 		 */
@@ -246,165 +239,4 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	}()
 
 	return tun, nil
-}
-
-func get_ip_muxid(fd int, name string) (int, error) {
-	// struct lifreq { /* 0x178 bytes */
-	//         char lifr_name[32]; /* offset: 0 bytes */
-	//         union  lifr_lifru1; /* offset: 32 bytes */
-	//         uint_t lifr_type; /* offset: 36 bytes */
-	//         union  lifr_lifru; /* offset: 40 bytes */
-	//                 - int lif_muxid[2];           /* mux id's for arp and ip */
-	// };
-	// #define lifr_ip_muxid   lifr_lifru.lif_muxid[0]
-	ifr := make([]byte, 0x178)
-	anb := []byte(name)
-	for i := 0; i < len(anb); i++ {
-		ifr[i] = anb[i]
-	}
-
-	_, err := unix.Ioctl(fd, SIOCGLIFMUXID, uintptr(unsafe.Pointer(&ifr[0])))
-	if err != nil {
-		return -1, fmt.Errorf("could not SIOCSLIFMUXID: %v", err)
-	}
-
-	/* ip_muxid = ifr.lifr_ip_muxid */
-	var ip_muxid int = int(*(*int32)(unsafe.Pointer(&ifr[40 + 4 * 0])))
-
-	return ip_muxid, nil
-}
-
-func set_ip_muxid(fd int, name string, ip_muxid int) (error) {
-	// struct lifreq { /* 0x178 bytes */
-	//         char lifr_name[32]; /* offset: 0 bytes */
-	//         union  lifr_lifru1; /* offset: 32 bytes */
-	//         uint_t lifr_type; /* offset: 36 bytes */
-	//         union  lifr_lifru; /* offset: 40 bytes */
-	//                 - int lif_muxid[2];           /* mux id's for arp and ip */
-	// };
-	// #define lifr_ip_muxid   lifr_lifru.lif_muxid[0]
-	ifr := make([]byte, 0x178)
-	anb := []byte(name)
-	for i := 0; i < len(anb); i++ {
-		ifr[i] = anb[i]
-	}
-	/* ifr.lifr_ip_muxid  = ip_muxid */
-	*(*int32)(unsafe.Pointer(&ifr[40 + 4 * 0])) = int32(ip_muxid)
-
-	_, err := unix.Ioctl(fd, SIOCSLIFMUXID, uintptr(unsafe.Pointer(&ifr[0])))
-	if err != nil {
-		return fmt.Errorf("could not SIOCSLIFMUXID: %v", err)
-	}
-
-	return nil
-}
-
-func punlink(fd int, muxid int) (error) {
-	_, err := unix.Ioctl(fd, unix.I_PUNLINK, uintptr(muxid))
-	if err != nil {
-		return fmt.Errorf("could not I_PUNLINK: %v", err)
-	}
-
-	return  nil
-}
-
-
-func plink(fd int, other_fd int) (int, error) {
-	ip_muxid, err := unix.Ioctl(fd, unix.I_PLINK, uintptr(other_fd))
-	if err != nil {
-		return -1, fmt.Errorf("could not I_PLINK: %v", err)
-	}
-
-	return ip_muxid, nil
-}
-
-func unit_select(fd int, ppa int) (error) {
-	int_ppa := make([]byte, 4) /* storage for the PPA number */
-	*(*int32)(unsafe.Pointer(&int_ppa[0])) = int32(ppa)
-
-	_, err := unix.Ioctl(fd, IF_UNITSEL, uintptr(unsafe.Pointer(&int_ppa[0])))
-	if err != nil {
-		return fmt.Errorf("could not select unit: %v", err)
-	}
-
-	return nil
-}
-
-func push_ip(fd int) (error) {
-	/*
-	 * We need a C string with the value "ip".
-	 */
-	modname := []byte{ 'i', 'p', 0 }
-
-	_, err := unix.Ioctl(fd, unix.I_PUSH, uintptr(unsafe.Pointer(&modname[0])))
-	if err != nil {
-		return fmt.Errorf("could not push IP module: %v\n", err)
-	}
-
-	return nil
-}
-
-/*
- * The "tun" device is a STREAMS module.  We need to make a STREAMS ioctl
- * request to that module using the TUNNEWPPA command.  Returns the newly
- * allocated PPA number.
- */
-func tun_new_ppa(fd int) (int, error) {
-	for try_ppa := 0; try_ppa < 128; try_ppa++ {
-		/*
-		 * The data pointer (ic_dp) for a TUNNEWPPA request must point to an
-		 * int32_t value.  This value will be read to determine whether we want
-		 * to allocate a specific PPA number, or if we want a dynamically
-		 * assigned PPA number by passing -1.  If successful, the ioctl will
-		 * return the allocated PPA number.
-		 */
-		int_ppa := make([]byte, 4) /* storage for the PPA number */
-		*(*int32)(unsafe.Pointer(&int_ppa[0])) = int32(try_ppa)
-
-		/*
-		 * Construct a "struct strioctl" for use with the I_STR request
-		 * we will make to the "tun" device.
-		 */
-		strioc := make([]byte, 0x18) /* struct strioctl */
-		*(*int32)(unsafe.Pointer(&strioc[0])) = TUNNEWPPA /* int ic_cmd */
-		*(*int32)(unsafe.Pointer(&strioc[4])) = 0 /* int ic_timout */
-		*(*int32)(unsafe.Pointer(&strioc[8])) = 4 /* int ic_len */
-		*(*uintptr)(unsafe.Pointer(&strioc[16])) = /* int ic_dp */
-		    uintptr(unsafe.Pointer(&int_ppa[0]))
-
-		new_ppa, err := unix.Ioctl(fd, unix.I_STR, uintptr(unsafe.Pointer(&strioc[0])))
-		if err == unix.EEXIST {
-			/*
-			 * This PPA appears to be in use; try the next one.
-			 */
-			continue
-		} else if err != nil {
-			return -1, fmt.Errorf("PPA allocation failure: %v", err)
-		}
-
-		return new_ppa, nil
-	}
-
-	return -1, fmt.Errorf("PPA allocation failure: all PPAs are busy")
-}
-
-/*
- * Read bytes from the TUN device into this slice, and return the number of
- * bytes we read.
- */
-func (tun *NativeTun) read_tun(buf []byte) (int, error) {
-	_, read, _, err := unix.Getmsg(int(tun.tunFile.Fd()), nil, buf)
-	if err != nil {
-		return -1, fmt.Errorf("TUN read failure: %w", err)
-	}
-
-	return len(read), nil
-}
-
-func (tun *NativeTun) write_tun(buf []byte) (int, error) {
-	if err := unix.Putmsg(int(tun.tunFile.Fd()), nil, buf, 0); err != nil {
-		return -1, fmt.Errorf("TUN write failure: %w", err)
-	}
-
-	return len(buf), nil
 }
