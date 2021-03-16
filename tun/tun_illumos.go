@@ -42,7 +42,7 @@ func (tun *NativeTun) Read(buf []byte, offset int) (int, error) {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		_, read, _, err := unix.Getmsg(int(tun.tunFile.Fd()), nil, buf)
+		_, read, _, err := unix.Getmsg(int(tun.tunFile.Fd()), nil, buf[offset:])
 		if err != nil {
 			return 0, err
 		}
@@ -52,7 +52,7 @@ func (tun *NativeTun) Read(buf []byte, offset int) (int, error) {
 
 // Write implements the Device interface
 func (tun *NativeTun) Write(buf []byte, offset int) (int, error) {
-	if err := unix.Putmsg(int(tun.tunFile.Fd()), nil, buf, 0); err != nil {
+	if err := unix.Putmsg(int(tun.tunFile.Fd()), nil, buf[offset:], 0); err != nil {
 		return 0, err
 	}
 	return len(buf), nil
