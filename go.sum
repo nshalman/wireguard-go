@@ -1,5 +1,5 @@
-github.com/nshalman/sys v0.0.0-20210318123755-e5ed8a25af52 h1:dg0CNV5eYIvm3I563nvqp9hF6vO1YmB/3gxJOPsYaxM=
-github.com/nshalman/sys v0.0.0-20210318123755-e5ed8a25af52/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
+github.com/nshalman/sys v0.0.0-20210423124517-8e1a65b46971 h1:evaMfJ+erx5NLgHzWc6WFsxDfRqdMZVpZjlRjQuNr8c=
+github.com/nshalman/sys v0.0.0-20210423124517-8e1a65b46971/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
 golang.org/x/crypto v0.0.0-20201221181555-eec23a3978ad h1:DN0cp81fZ3njFcrLCytUHRSUkqBjfTo4Tx9RJTWs0EY=
 golang.org/x/crypto v0.0.0-20201221181555-eec23a3978ad/go.mod h1:jdWPYTVW3xRLrWPugEBEK3UY2ZEsg3UU495nc5E+M+I=

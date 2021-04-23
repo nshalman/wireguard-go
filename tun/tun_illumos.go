@@ -76,12 +76,12 @@ func (tun *NativeTun) Events() chan Event {
 // Close implements the Device interface
 func (tun *NativeTun) Close() error {
 	if tun.ip_fd >= 0 {
-		id, err := unix.IoctlGetIPMuxID(tun.ip_fd, tun.name)
+		id, err := ioctlGetIPMuxID(tun.ip_fd, tun.name)
 		if err != nil {
 			return err
 		}
 
-		if err = unix.IoctlPunlink(tun.ip_fd, id); err != nil {
+		if err = unix.IoctlSetInt(tun.ip_fd, unix.I_PUNLINK, id); err != nil {
 			return err
 		}
 
@@ -152,7 +152,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	 */
 	var ppa int
 	for try := 0; try < 128; try++ {
-		ppa, err = unix.IoctlTunNewPPA(fd, try)
+		ppa, err = ioctlTunNewPPA(fd, try)
 		if err != nil {
 			if err == unix.EEXIST {
 				// PPA already in use, try the next one.
@@ -201,7 +201,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, err
 	}
 
-	muxid, err := unix.IoctlPlink(ip_fd, if_fd)
+	muxid, err := unix.IoctlSetIntRetInt(ip_fd, unix.I_PLINK, if_fd)
 	if err != nil {
 		unix.Close(if_fd)
 		unix.Close(ip_fd)
@@ -215,8 +215,8 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	 */
 	unix.Close(if_fd)
 
-	if err = unix.IoctlSetIPMuxID(ip_fd, name, muxid); err != nil {
-		unix.IoctlPunlink(ip_fd, muxid)
+	if err = ioctlSetIPMuxID(ip_fd, name, muxid); err != nil {
+		unix.IoctlSetInt(ip_fd, unix.I_PUNLINK, muxid)
 		unix.Close(ip_fd)
 		tunFile.Close()
 		return nil, err
@@ -239,4 +239,49 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	}()
 
 	return tun, nil
+}
+
+
+func ioctlGetIPMuxID(fd int, name string) (int, error) {
+	var req unix.Lifreq
+	if err := req.SetName(name); err != nil {
+		return -1, err
+	}
+	// In the ioctl syscall definition, req is a uint, but on Illumos
+	// it's an int. This means that the SIOCGLIFMUXID constant is
+	// defined as negative, and can't be used inline in the ioctl
+	// call. We have to explicitly initialize an int and then cast
+	// that to uint.
+	reqnum := int(unix.SIOCGLIFMUXID)
+	if err := unix.IoctlLifreq(fd, uint(reqnum), &req); err != nil {
+		return -1, err
+	}
+
+	id := req.GetLifruInt()
+	return id, nil
+}
+
+func ioctlSetIPMuxID(fd int, name string, muxID int) error {
+	var req unix.Lifreq
+	if err := req.SetName(name); err != nil {
+		return err
+	}
+	req.SetLifruInt(muxID)
+
+	// In the ioctl syscall definition, req is a uint, but on Illumos
+	// it's an int. This means that the SIOCSLIFMUXID constant is
+	// defined as negative, and can't be used inline in the ioctl
+	// call. We have to explicitly initialize an int and then cast
+	// that to uint.
+	reqnum := int(unix.SIOCSLIFMUXID)
+	return unix.IoctlLifreq(fd, uint(reqnum), &req)
+}
+
+func ioctlTunNewPPA(fd int, ppaNum int) (ppa int, err error) {
+	var req unix.Strioctl
+	req.Cmd = unix.TUNNEWPPA
+	req.SetInt(ppaNum)
+
+	ppa, err = unix.IoctlSetStrioctlRetInt(fd, unix.I_STR, req)
+	return ppa, err
 }
