@@ -151,8 +151,11 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	 * Ask the TUN driver for a new PPA number:
 	 */
 	var ppa int
+	var s unix.Strioctl
+	s.Cmd = unix.TUNNEWPPA
 	for try := 0; try < 128; try++ {
-		ppa, err = ioctlTunNewPPA(fd, try)
+		s.SetInt(try)
+		ppa, err = unix.IoctlSetStrioctlRetInt(fd, unix.I_STR, &s)
 		if err != nil {
 			if err == unix.EEXIST {
 				// PPA already in use, try the next one.
@@ -275,13 +278,4 @@ func ioctlSetIPMuxID(fd int, name string, muxID int) error {
 	// that to uint.
 	reqnum := int(unix.SIOCSLIFMUXID)
 	return unix.IoctlLifreq(fd, uint(reqnum), &req)
-}
-
-func ioctlTunNewPPA(fd int, ppaNum int) (ppa int, err error) {
-	var req unix.Strioctl
-	req.Cmd = unix.TUNNEWPPA
-	req.SetInt(ppaNum)
-
-	ppa, err = unix.IoctlSetStrioctlRetInt(fd, unix.I_STR, req)
-	return ppa, err
 }
