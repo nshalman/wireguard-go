@@ -76,12 +76,23 @@ func (tun *NativeTun) Events() chan Event {
 // Close implements the Device interface
 func (tun *NativeTun) Close() error {
 	if tun.ip_fd >= 0 {
-		id, err := ioctlGetIPMuxID(tun.ip_fd, tun.name)
-		if err != nil {
+
+		var l unix.Lifreq
+		if err := l.SetName(tun.name); err != nil {
 			return err
 		}
 
-		if err = unix.IoctlSetInt(tun.ip_fd, unix.I_PUNLINK, id); err != nil {
+		// illumos defines the ioctl number as a signed int, but the
+		// common x/sys/unix functions use uint. Hand-cast things to help
+		// the compiler figure it out.
+		reqnum := int(unix.SIOCGLIFMUXID)
+		if err := unix.IoctlLifreq(tun.ip_fd, uint(reqnum), &l); err != nil {
+			return err
+		}
+
+		id := l.GetLifruInt()
+
+		if err := unix.IoctlSetInt(tun.ip_fd, unix.I_PUNLINK, id); err != nil {
 			return err
 		}
 
@@ -193,7 +204,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, err
 	}
 
-	// Illumos defines the ioctl number as a signed int, but the
+	// illumos defines the ioctl number as a signed int, but the
 	// common x/sys/unix functions use uint. Hand-cast things to help
 	// the compiler figure it out.
 	req := int(unix.IF_UNITSEL)
@@ -218,7 +229,20 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	 */
 	unix.Close(if_fd)
 
-	if err = ioctlSetIPMuxID(ip_fd, name, muxid); err != nil {
+	var l unix.Lifreq
+	if err := l.SetName(name); err != nil {
+		unix.IoctlSetInt(ip_fd, unix.I_PUNLINK, muxid)
+		unix.Close(ip_fd)
+		tunFile.Close()
+		return nil, err
+	}
+
+	// illumos defines the ioctl number as a signed int, but the
+	// common x/sys/unix functions use uint. Hand-cast things to help
+	// the compiler figure it out.
+	reqnum := int(unix.SIOCSLIFMUXID)
+	l.SetLifruInt(muxid)
+	if err = unix.IoctlLifreq(ip_fd, uint(reqnum), &l); err != nil {
 		unix.IoctlSetInt(ip_fd, unix.I_PUNLINK, muxid)
 		unix.Close(ip_fd)
 		tunFile.Close()
@@ -245,37 +269,3 @@ func CreateTUN(name string, mtu int) (Device, error) {
 }
 
 
-func ioctlGetIPMuxID(fd int, name string) (int, error) {
-	var req unix.Lifreq
-	if err := req.SetName(name); err != nil {
-		return -1, err
-	}
-	// In the ioctl syscall definition, req is a uint, but on Illumos
-	// it's an int. This means that the SIOCGLIFMUXID constant is
-	// defined as negative, and can't be used inline in the ioctl
-	// call. We have to explicitly initialize an int and then cast
-	// that to uint.
-	reqnum := int(unix.SIOCGLIFMUXID)
-	if err := unix.IoctlLifreq(fd, uint(reqnum), &req); err != nil {
-		return -1, err
-	}
-
-	id := req.GetLifruInt()
-	return id, nil
-}
-
-func ioctlSetIPMuxID(fd int, name string, muxID int) error {
-	var req unix.Lifreq
-	if err := req.SetName(name); err != nil {
-		return err
-	}
-	req.SetLifruInt(muxID)
-
-	// In the ioctl syscall definition, req is a uint, but on Illumos
-	// it's an int. This means that the SIOCSLIFMUXID constant is
-	// defined as negative, and can't be used inline in the ioctl
-	// call. We have to explicitly initialize an int and then cast
-	// that to uint.
-	reqnum := int(unix.SIOCSLIFMUXID)
-	return unix.IoctlLifreq(fd, uint(reqnum), &req)
-}
