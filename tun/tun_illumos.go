@@ -20,7 +20,6 @@ const (
 	IP6_NODE = "/dev/udp6"
 )
 
-// NativeTun is the OS-specific implementation of a tun interface.
 type NativeTun struct {
 	tunFile *os.File /* TUN device file */
 	name    string   /* Interface name */
@@ -29,18 +28,15 @@ type NativeTun struct {
 	errors chan error
 }
 
-// Name implements the Device interface
 func (tun *NativeTun) Name() (string, error) {
 	return tun.name, nil
 }
 
-// Flush implements the Device interface
 func (tun *NativeTun) Flush() error {
 	// TODO: can flushing be implemented by buffering and using sendmmsg?
 	return nil
 }
 
-// Read implements the Device interface
 func (tun *NativeTun) Read(buf []byte, offset int) (int, error) {
 	select {
 	case err := <-tun.errors:
@@ -54,7 +50,6 @@ func (tun *NativeTun) Read(buf []byte, offset int) (int, error) {
 	}
 }
 
-// Write implements the Device interface
 func (tun *NativeTun) Write(buf []byte, offset int) (int, error) {
 	if err := unix.Putmsg(int(tun.tunFile.Fd()), nil, buf[offset:], 0); err != nil {
 		return 0, err
@@ -62,12 +57,10 @@ func (tun *NativeTun) Write(buf []byte, offset int) (int, error) {
 	return len(buf), nil
 }
 
-// File implements the Device interface
 func (tun *NativeTun) File() *os.File {
 	return tun.tunFile
 }
 
-// MTU implements the Device interface
 func (tun *NativeTun) MTU() (int, error) {
 	ip_fd, err := unix.Open(IP_NODE, unix.O_RDWR, 0)
 	if err != nil {
@@ -90,7 +83,6 @@ func (tun *NativeTun) MTU() (int, error) {
 	return int(l.GetLifruUint()), nil
 }
 
-// Events implements the Device interface
 func (tun *NativeTun) Events() chan Event {
 	return tun.events
 }
@@ -126,7 +118,6 @@ func closeTun(name string) error {
 	return nil
 }
 
-// Close implements the Device interface
 func (tun *NativeTun) Close() error {
 	closeTun(tun.name)
 
