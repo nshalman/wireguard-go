@@ -1,22 +1,25 @@
+//go:build illumos
+// +build illumos
+
 /* SPDX-License-Identifier: MIT
  *
- * Copyright (C) 2017-2019 WireGuard LLC. All Rights Reserved.
- * Copyright 2019 Joyent, Inc.
+ * Copyright (C) 2017-2021 WireGuard LLC. All Rights Reserved.
  */
-
-// +build illumos
 
 package ipc
 
 import (
 	"net"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 type UAPIListener struct {
 	listener net.Listener // unix socket listener
 	connNew  chan net.Conn
 	connErr  chan error
+	evPort   *unix.EventPort
 }
 
 func (l *UAPIListener) Accept() (net.Conn, error) {
@@ -32,7 +35,12 @@ func (l *UAPIListener) Accept() (net.Conn, error) {
 }
 
 func (l *UAPIListener) Close() error {
-	return l.listener.Close()
+	err1 := l.evPort.Close()
+	err2 := l.listener.Close()
+	if err1 != nil {
+		return err1
+	}
+	return err2
 }
 
 func (l *UAPIListener) Addr() net.Addr {
@@ -57,6 +65,36 @@ func UAPIListen(name string, file *os.File) (net.Listener, error) {
 	if unixListener, ok := listener.(*net.UnixListener); ok {
 		unixListener.SetUnlinkOnClose(true)
 	}
+
+	socketPath := sockPath(name)
+
+	// watch for deletion of socket
+
+	uapi.evPort, err = unix.NewEventPort()
+	if err != nil {
+		return nil, err
+	}
+	stat, err := os.Lstat(socketPath)
+	uapi.evPort.AssociatePath(socketPath, stat, unix.FILE_MODIFIED|unix.FILE_ATTRIB|unix.FILE_NOFOLLOW, nil)
+
+	go func(l *UAPIListener) {
+		for {
+			// start with lstat to avoid race condition
+			if _, err := os.Lstat(socketPath); os.IsNotExist(err) {
+				l.connErr <- err
+				return
+			}
+			_, perr := l.evPort.GetOne(nil)
+			if perr == unix.EINTR {
+				// If we were interrupted, resume watching.
+				continue
+			}
+			if perr != nil {
+				l.connErr <- perr
+				return
+			}
+		}
+	}(uapi)
 
 	// watch for new connections
 
