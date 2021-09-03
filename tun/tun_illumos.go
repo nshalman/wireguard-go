@@ -14,10 +14,13 @@ import (
 	"os"
 )
 
+const (
+	IP_NODE = "/dev/udp"
+)
+
 // NativeTun is the OS-specific implementation of a tun interface.
 type NativeTun struct {
 	tunFile *os.File /* TUN device file */
-	ip_fd   int      /* IP device fd */
 	name    string   /* Interface name */
 	mtu     int
 
@@ -75,30 +78,31 @@ func (tun *NativeTun) Events() chan Event {
 
 // Close implements the Device interface
 func (tun *NativeTun) Close() error {
-	if tun.ip_fd >= 0 {
-
-		var l unix.Lifreq
-		if err := l.SetName(tun.name); err != nil {
-			return err
-		}
-
-		// illumos defines the ioctl number as a signed int, but the
-		// common x/sys/unix functions use uint. Hand-cast things to help
-		// the compiler figure it out.
-		reqnum := int(unix.SIOCGLIFMUXID)
-		if err := unix.IoctlLifreq(tun.ip_fd, uint(reqnum), &l); err != nil {
-			return err
-		}
-
-		id := l.GetLifruInt()
-
-		if err := unix.IoctlSetInt(tun.ip_fd, unix.I_PUNLINK, id); err != nil {
-			return err
-		}
-
-		unix.Close(tun.ip_fd)
-		tun.ip_fd = -1
+	ip_fd, err := unix.Open(IP_NODE, unix.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("Could not open IP (%s)", IP_NODE)
 	}
+
+	var l unix.Lifreq
+	if err := l.SetName(tun.name); err != nil {
+		return err
+	}
+
+	// illumos defines the ioctl number as a signed int, but the
+	// common x/sys/unix functions use uint. Hand-cast things to help
+	// the compiler figure it out.
+	reqnum := int(unix.SIOCGLIFMUXID)
+	if err := unix.IoctlLifreq(ip_fd, uint(reqnum), &l); err != nil {
+		return err
+	}
+
+	id := l.GetLifruInt()
+
+	if err := unix.IoctlSetInt(ip_fd, unix.I_PUNLINK, id); err != nil {
+		return err
+	}
+
+	unix.Close(ip_fd)
 
 	if tun.tunFile != nil {
 		tun.tunFile.Close()
@@ -123,7 +127,15 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 	 * information) through the environment to the child.  For now, use the
 	 * "-f" flag.
 	 */
-	return nil, fmt.Errorf("CreateTUNFromFile() not currently supported")
+	tun := &NativeTun{
+		events:  make(chan Event, 10),
+		errors:  make(chan error, 1),
+		mtu:     mtu, /* XXX We should do something with the MTU! */
+		name:    file.Name(),
+		tunFile: file,
+	}
+	return tun, nil
+	//return nil, fmt.Errorf("CreateTUNFromFile() not currently supported:\n%v", file)
 }
 
 func CreateTUN(name string, mtu int) (Device, error) {
@@ -135,15 +147,14 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	 * To establish a "tun" interface, we need to open a few file
 	 * descriptors.
 	 */
-	ip_node := "/dev/udp"
 	dev_node := "/dev/tun"
 
 	/*
 	 * First, the IP driver:
 	 */
-	ip_fd, err := unix.Open(ip_node, unix.O_RDWR, 0)
+	ip_fd, err := unix.Open(IP_NODE, unix.O_RDWR, 0)
 	if err != nil {
-		return nil, fmt.Errorf("Could not open IP (%s)", ip_node)
+		return nil, fmt.Errorf("Could not open IP (%s)", IP_NODE)
 	}
 
 	/*
@@ -255,7 +266,6 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		mtu:     mtu, /* XXX We should do something with the MTU! */
 		name:    name,
 		tunFile: tunFile,
-		ip_fd:   ip_fd,
 	}
 
 	defer func() {
