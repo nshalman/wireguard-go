@@ -1,9 +1,10 @@
+//go:build illumos && amd64
+// +build illumos,amd64
+
 /* SPDX-License-Identifier: MIT
  *
  * Copyright 2019 Joyent, Inc.
  */
-
-// +build illumos,amd64
 
 package tun
 
@@ -23,7 +24,6 @@ const (
 type NativeTun struct {
 	tunFile *os.File /* TUN device file */
 	name    string   /* Interface name */
-	mtu     int
 
 	events chan Event
 	errors chan error
@@ -69,7 +69,25 @@ func (tun *NativeTun) File() *os.File {
 
 // MTU implements the Device interface
 func (tun *NativeTun) MTU() (int, error) {
-	return tun.mtu, nil
+	ip_fd, err := unix.Open(IP_NODE, unix.O_RDWR, 0)
+	if err != nil {
+		return 0, fmt.Errorf("Could not open IP (%s)", IP_NODE)
+	}
+	defer unix.Close(ip_fd)
+
+	var l unix.Lifreq
+	if err := l.SetName(tun.name); err != nil {
+		return 0, err
+	}
+
+	// illumos defines the ioctl number as a signed int, but the
+	// common x/sys/unix functions use uint. Hand-cast things to help
+	// the compiler figure it out.
+	reqnum := int(unix.SIOCGLIFMTU)
+	if err = unix.IoctlLifreq(ip_fd, uint(reqnum), &l); err != nil {
+		return 0, fmt.Errorf("unable to SIOCGLIFMTU: %v", err)
+	}
+	return int(l.GetLifruUint()), nil
 }
 
 // Events implements the Device interface
@@ -128,7 +146,6 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 	tun := &NativeTun{
 		events:  make(chan Event, 10),
 		errors:  make(chan error, 1),
-		mtu:     mtu, /* XXX We should do something with the MTU! */
 		name:    file.Name(),
 		tunFile: file,
 	}
@@ -266,10 +283,22 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, fmt.Errorf("unable to SIOCSLIFMUXID: %v", err)
 	}
 
+	// illumos defines the ioctl number as a signed int, but the
+	// common x/sys/unix functions use uint. Hand-cast things to help
+	// the compiler figure it out.
+	reqnum = int(unix.SIOCSLIFMTU)
+	l.SetLifruUint(uint(mtu))
+	if err = unix.IoctlLifreq(ip_fd, uint(reqnum), &l); err != nil {
+		unix.IoctlSetInt(ip_fd, unix.I_PUNLINK, muxid)
+		unix.Close(ip_fd)
+		tunFile.Close()
+		closeTun(name)
+		return nil, fmt.Errorf("unable to SIOCSLIFMTU: %v", err)
+	}
+
 	tun := &NativeTun{
 		events:  make(chan Event, 10),
 		errors:  make(chan error, 1),
-		mtu:     mtu, /* XXX We should do something with the MTU! */
 		name:    name,
 		tunFile: tunFile,
 	}
