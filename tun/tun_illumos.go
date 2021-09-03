@@ -15,11 +15,6 @@ import (
 	"os"
 )
 
-const (
-	IP_NODE  = "/dev/udp"
-	IP6_NODE = "/dev/udp6"
-)
-
 type NativeTun struct {
 	tunFile *os.File /* TUN device file */
 	name    string   /* Interface name */
@@ -62,9 +57,9 @@ func (tun *NativeTun) File() *os.File {
 }
 
 func (tun *NativeTun) MTU() (int, error) {
-	ip_fd, err := unix.Open(IP_NODE, unix.O_RDWR, 0)
+	ip_fd, err:= unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 	if err != nil {
-		return 0, fmt.Errorf("Could not open IP (%s)", IP_NODE)
+		return 0, fmt.Errorf("could not open a UDP Socket")
 	}
 	defer unix.Close(ip_fd)
 
@@ -88,10 +83,10 @@ func (tun *NativeTun) Events() chan Event {
 }
 
 func closeTun(name string) error {
-	for _, node := range []string{IP_NODE, IP6_NODE} {
-		ip_fd, err := unix.Open(node, unix.O_RDWR, 0)
+	for _, proto := range []int{unix.AF_INET, unix.AF_INET6} {
+		ip_fd, err := unix.Socket(proto, unix.SOCK_DGRAM, 0)
 		if err != nil {
-			return fmt.Errorf("Could not open IP (%s)", node)
+			return fmt.Errorf("could not open Socket of type %v", proto)
 		}
 
 		var l unix.Lifreq
@@ -157,9 +152,9 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	/*
 	 * First, the IP driver:
 	 */
-	ip_fd, err := unix.Open(IP_NODE, unix.O_RDWR, 0)
+	ip_fd, err:= unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
 	if err != nil {
-		return nil, fmt.Errorf("Could not open IP (%s)", IP_NODE)
+		return nil, fmt.Errorf("could not open a UDP Socket")
 	}
 
 	/*
