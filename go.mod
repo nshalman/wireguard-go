@@ -7,3 +7,5 @@ require (
 	golang.org/x/net v0.0.0-20210226172049-e18ecbb05110
 	golang.org/x/sys v0.0.0-20210426230700-d19ff857e887
 )
+
+replace golang.org/x/sys => ../sys
