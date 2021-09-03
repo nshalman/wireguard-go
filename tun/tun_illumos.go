@@ -20,6 +20,7 @@ import (
 )
 
 type NativeTun struct {
+	name    string
 	tunFile *os.File
 	events  chan Event
 	errors  chan error
@@ -137,10 +138,11 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	}
 
 	dev_node := "/dev/tun"
-	fd, err := unix.Open(dev_node, unix.O_RDWR, 0)
+        tunFile, err := os.OpenFile(dev_node, unix.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("Could not open TUN (%s)", dev_node)
 	}
+        fd := int(tunFile.Fd())
 
 	// Ask the TUN driver for a new PPA number:
 	var ppa int
@@ -154,7 +156,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 				// PPA already in use, try the next one.
 				continue
 			}
-			unix.Close(fd)
+			tunFile.Close()
 			return nil, err
 		}
 		break
@@ -180,8 +182,8 @@ func CreateTUN(name string, mtu int) (Device, error) {
 
 	// Push the IP module onto the new TUN device.
 	if err = unix.IoctlSetString(if_fd, unix.I_PUSH, "ip"); err != nil {
+		tunFile.Close()
 		tunDestroy(name)
-		unix.Close(fd)
 		return nil, fmt.Errorf("unable to push IP module: %v", err)
 	}
 
@@ -191,22 +193,22 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	req := int(unix.IF_UNITSEL)
 	err = unix.IoctlSetPointerInt(if_fd, uint(req), ppa)
 	if err != nil {
+		tunFile.Close()
 		tunDestroy(name)
-		unix.Close(fd)
 		return nil, fmt.Errorf("unable to IF_UNITSEL: %v", err)
 	}
 
 	muxid, err := unix.IoctlSetIntRetInt(ip_fd, unix.I_PLINK, if_fd)
 	if err != nil {
+		tunFile.Close()
 		tunDestroy(name)
-		unix.Close(fd)
 		return nil, fmt.Errorf("unable to I_PLINK: %v", err)
 	}
 
 	var l unix.Lifreq
 	if err := l.SetName(name); err != nil {
+		tunFile.Close()
 		tunDestroy(name)
-		unix.Close(fd)
 		return nil, fmt.Errorf("failed to set name on Lifreq :%v", err)
 	}
 
@@ -216,8 +218,8 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	reqnum := int(unix.SIOCSLIFMUXID)
 	l.SetLifruInt(muxid)
 	if err = unix.IoctlLifreq(ip_fd, uint(reqnum), &l); err != nil {
+		tunFile.Close()
 		tunDestroy(name)
-		unix.Close(fd)
 		return nil, fmt.Errorf("unable to SIOCSLIFMUXID: %v", err)
 	}
 
