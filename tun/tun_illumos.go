@@ -115,22 +115,25 @@ func tunDestroy(name string) error {
 	if err := l.SetName(name); err != nil {
 		return err
 	}
+	// cleanup both ipv4 and ipv6
 	for _, proto := range []int{unix.AF_INET, unix.AF_INET6} {
 		fd, err := unix.Socket(proto, unix.SOCK_DGRAM, 0)
 		if err != nil {
 			return fmt.Errorf("could not open Socket of type %v", proto)
 		}
 
-		// illumos defines the ioctl number as a signed int, but the
-		// common x/sys/unix functions use uint. Hand-cast things to help
-		// the compiler figure it out.
+		// get the STREAMS muxid for the tun device stream
 		reqnum := int(unix.SIOCGLIFMUXID)
+
+		// illumos defines the ioctl number as a signed int, but the
+		// common x/sys/unix functions use uint.
 		if err := unix.IoctlLifreq(fd, uint(reqnum), &l); err != nil {
 			continue
 		}
 
 		id := l.GetLifruInt()
 
+		// Unlink the tun stream from the IP mutiplexor
 		if err := unix.IoctlSetInt(fd, unix.I_PUNLINK, id); err != nil {
 			continue
 		}
@@ -141,8 +144,12 @@ func tunDestroy(name string) error {
 }
 
 func CreateTUN(name string, mtu int) (Device, error) {
+	ppa := -1
 	if name != "tun" {
-		return nil, fmt.Errorf("Interface name must be 'tun'")
+		_, err := fmt.Sscanf(name, "tun%d", &ppa)
+		if err != nil || ppa < 0 {
+			return nil, fmt.Errorf("Interface name must be tun[0-9]*")
+		}
 	}
 
 	fd, err := unix.Open(tunNode, unix.O_RDWR, 0)
@@ -150,25 +157,20 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, fmt.Errorf("Could not open TUN (%s)", tunNode)
 	}
 
-	// Ask the TUN driver for a new PPA number:
-	var ppa int
+	// The "tun" device is a STREAMS module.  We need to make a STREAMS ioctl
+	// request to that module using the TUNNEWPPA command.  Returns the newly
+	// allocated PPA number. Passing -1 will request a dynamically assinged
+	// PPA. Passing a specific id will try to use the one specified.
 	var s unix.Strioctl
 	s.Cmd = unix.TUNNEWPPA
-	for try := 0; try < 128; try++ {
-		s.SetInt(try)
-		ppa, err = unix.IoctlSetStrioctlRetInt(fd, unix.I_STR, &s)
-		if err != nil {
-			if err == unix.EEXIST {
-				// PPA already in use, try the next one.
-				continue
-			}
-			unix.Close(fd)
-			return nil, err
-		}
-		break
+	s.SetInt(ppa)
+	ppa, err = unix.IoctlSetStrioctlRetInt(fd, unix.I_STR, &s)
+	if err != nil {
+		return nil, err
 	}
 
 	assignedName := fmt.Sprintf("tun%d", ppa)
+
 	// Immediately do a full cleanup of anything stale left behind by a previous crash
 	tunDestroy(assignedName)
 
@@ -193,9 +195,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, fmt.Errorf("unable to push IP module: %v", err)
 	}
 
-	// illumos defines the ioctl number as a signed int, but the
-	// common x/sys/unix functions use uint. Hand-cast things to help
-	// the compiler figure it out.
+	// select which ppa we're trying to use
 	req := int(unix.IF_UNITSEL)
 	err = unix.IoctlSetPointerInt(tunFD, uint(req), ppa)
 	if err != nil {
@@ -204,6 +204,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, fmt.Errorf("unable to IF_UNITSEL: %v", err)
 	}
 
+	// link the tun stream to the IP multiplexor
 	muxid, err := unix.IoctlSetIntRetInt(dgramFD, unix.I_PLINK, tunFD)
 	if err != nil {
 		unix.Close(fd)
@@ -218,9 +219,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, fmt.Errorf("failed to set assignedName on Lifreq :%v", err)
 	}
 
-	// illumos defines the ioctl number as a signed int, but the
-	// common x/sys/unix functions use uint. Hand-cast things to help
-	// the compiler figure it out.
+	// set the IP muxid
 	reqnum := int(unix.SIOCSLIFMUXID)
 	l.SetLifruInt(muxid)
 	if err = unix.IoctlLifreq(dgramFD, uint(reqnum), &l); err != nil {
@@ -234,6 +233,10 @@ func CreateTUN(name string, mtu int) (Device, error) {
 }
 
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
+	// Rather than do complicated gymnastics trying to determine which tunN
+	// we were using from the file descriptor, modify main.go to pass that
+	// along in an environment variable and set it as the Name() property
+	// of the os.File so that we can read it back here. Easy peasy.
 	name := file.Name()
 	if name == "" {
 		return nil, fmt.Errorf("could not determine device name from os.File")
@@ -320,9 +323,6 @@ func (tun *NativeTun) setMTU(n int) error {
 		return err
 	}
 
-	// illumos defines the ioctl number as a signed int, but the
-	// common x/sys/unix functions use uint. Hand-cast things to help
-	// the compiler figure it out.
 	reqnum := int(unix.SIOCSLIFMTU)
 	l.SetLifruUint(uint(n))
 	if err = unix.IoctlLifreq(fd, uint(reqnum), &l); err != nil {
@@ -344,9 +344,6 @@ func (tun *NativeTun) MTU() (int, error) {
 		return 0, err
 	}
 
-	// illumos defines the ioctl number as a signed int, but the
-	// common x/sys/unix functions use uint. Hand-cast things to help
-	// the compiler figure it out.
 	reqnum := int(unix.SIOCGLIFMTU)
 	if err = unix.IoctlLifreq(fd, uint(reqnum), &l); err != nil {
 		return 0, fmt.Errorf("unable to SIOCGLIFMTU: %v", err)
