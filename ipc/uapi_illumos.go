@@ -70,7 +70,13 @@ func UAPIListen(name string, file *os.File) (net.Listener, error) {
 		return nil, err
 	}
 	stat, err := os.Lstat(socketPath)
-	uapi.evPort.AssociatePath(socketPath, stat, unix.FILE_MODIFIED|unix.FILE_ATTRIB|unix.FILE_NOFOLLOW, nil)
+	if err != nil {
+		return nil, err
+	}
+	err = uapi.evPort.AssociatePath(socketPath, stat, unix.FILE_MODIFIED|unix.FILE_ATTRIB|unix.FILE_NOFOLLOW, nil)
+	if err != nil {
+		return nil, err
+	}
 
 	go func(l *UAPIListener) {
 		for {
