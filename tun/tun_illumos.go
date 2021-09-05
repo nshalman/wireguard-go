@@ -39,19 +39,14 @@ func (tun *NativeTun) routineRouteListener() {
 		statusMTU int
 	)
 
-	tunIfindex, err := func() (int, error) {
-		iface, err := net.InterfaceByName(tun.name)
-		if err != nil {
-			return -1, err
-		}
-		return iface.Index, nil
-	}()
+	defer close(tun.events)
+
+	iface, err := net.InterfaceByName(tun.name)
 	if err != nil {
 		tun.errors <- err
 		return
 	}
-
-	defer close(tun.events)
+	tunIfindex := iface.Index
 
 	routeSocket, err := unix.Socket(unix.AF_ROUTE, unix.SOCK_RAW, unix.AF_UNSPEC)
 	if err != nil {
