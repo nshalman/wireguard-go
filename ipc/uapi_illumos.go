@@ -1,6 +1,3 @@
-//go:build illumos
-// +build illumos
-
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2021 WireGuard LLC. All Rights Reserved.
