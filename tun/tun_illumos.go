@@ -11,21 +11,26 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
 
 const (
+	ipNode  = "/dev/ip"
 	tunNode = "/dev/tun"
 )
 
 type NativeTun struct {
-	fd      int
-	name    string
-	tunFile *os.File
-	events  chan Event
-	errors  chan error
+	fd          int
+	tunFile     *os.File
+	events      chan Event
+	errors      chan error
+	ipfd        int
+	routeSocket int
+	name        string
+	closeOnce   sync.Once
 }
 
 // XXX This is largely copied from the freebsd code...
@@ -113,6 +118,7 @@ func tunDestroy(name string) error {
 		if err != nil {
 			return fmt.Errorf("could not open Socket of type %v", proto)
 		}
+		defer unix.Close(fd)
 
 		// get the STREAMS muxid for the tun device stream
 		reqnum := int(unix.SIOCGLIFMUXID)
@@ -129,8 +135,6 @@ func tunDestroy(name string) error {
 		if err := unix.IoctlSetInt(fd, unix.I_PUNLINK, id); err != nil {
 			continue
 		}
-
-		unix.Close(fd)
 	}
 	return nil
 }
@@ -163,62 +167,8 @@ func CreateTUN(name string, mtu int) (Device, error) {
 
 	assignedName := fmt.Sprintf("tun%d", ppa)
 
-	// Immediately do a full cleanup of anything stale left behind by a previous crash
+	// Clean up anything possibly left behind by a crash
 	tunDestroy(assignedName)
-
-	dgramFD, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
-	if err != nil {
-		return nil, fmt.Errorf("could not open a UDP Socket")
-	}
-	defer unix.Close(dgramFD)
-
-	// Unclear why, but we need to open a second handle on the tun device for
-	// the ioctls that follow. Reusing the existing one does not work.
-	tunFD, err := unix.Open(tunNode, unix.O_RDWR, 0)
-	if err != nil {
-		return nil, fmt.Errorf("Could not open TUN (%s)", tunNode)
-	}
-	defer unix.Close(tunFD)
-
-	// Push the IP module onto the new TUN device.
-	if err = unix.IoctlSetString(tunFD, unix.I_PUSH, "ip"); err != nil {
-		unix.Close(fd)
-		tunDestroy(assignedName)
-		return nil, fmt.Errorf("unable to push IP module: %v", err)
-	}
-
-	// select which ppa we're trying to use
-	req := int(unix.IF_UNITSEL)
-	err = unix.IoctlSetPointerInt(tunFD, uint(req), ppa)
-	if err != nil {
-		unix.Close(fd)
-		tunDestroy(assignedName)
-		return nil, fmt.Errorf("unable to IF_UNITSEL: %v", err)
-	}
-
-	// link the tun stream to the IP multiplexor
-	muxid, err := unix.IoctlSetIntRetInt(dgramFD, unix.I_PLINK, tunFD)
-	if err != nil {
-		unix.Close(fd)
-		tunDestroy(assignedName)
-		return nil, fmt.Errorf("unable to I_PLINK: %v", err)
-	}
-
-	var l unix.Lifreq
-	if err := l.SetName(assignedName); err != nil {
-		unix.Close(fd)
-		tunDestroy(assignedName)
-		return nil, fmt.Errorf("failed to set assignedName on Lifreq :%v", err)
-	}
-
-	// set the IP muxid
-	reqnum := int(unix.SIOCSLIFMUXID)
-	l.SetLifruInt(muxid)
-	if err = unix.IoctlLifreq(dgramFD, uint(reqnum), &l); err != nil {
-		unix.Close(fd)
-		tunDestroy(assignedName)
-		return nil, fmt.Errorf("unable to SIOCSLIFMUXID: %v", err)
-	}
 
 	file := os.NewFile(uintptr(fd), assignedName)
 	return CreateTUNFromFile(file, mtu)
@@ -233,23 +183,98 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 	if name == "" {
 		return nil, fmt.Errorf("could not determine device name from os.File")
 	}
+
+	// By holding open this file descriptor on /dev/ip for the life of the connection
+	// and using I_LINK, STREAMS will tear everything down cleanly when we close these
+	// file descriptors
+	ipfd, err := unix.Open(ipNode, unix.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("Could not open %s", ipNode)
+	}
+
+	routeSocket, err := unix.Socket(unix.AF_ROUTE, unix.SOCK_RAW, unix.AF_UNSPEC)
+	if err != nil {
+		return nil, err
+	}
+
 	tun := &NativeTun{
-		fd:      int(file.Fd()),
-		name:    name,
-		tunFile: file,
-		events:  make(chan Event, 10),
-		errors:  make(chan error, 1),
+		fd:          int(file.Fd()),
+		ipfd:        ipfd,
+		name:        name,
+		tunFile:     file,
+		routeSocket: routeSocket,
+		events:      make(chan Event, 10),
+		errors:      make(chan error, 1),
+	}
+
+	err = tun.configureSTREAMS()
+	if err != nil {
+		tun.Close()
+		return nil, err
 	}
 
 	go tun.routineRouteListener()
 
-	err := tun.setMTU(mtu)
+	err = tun.setMTU(mtu)
 	if err != nil {
 		tun.Close()
 		return nil, err
 	}
 
 	return tun, nil
+}
+
+func (tun *NativeTun) configureSTREAMS() error {
+	// get back the ppa number from the name
+	var ppa int
+	_, err := fmt.Sscanf(tun.name, "tun%d", &ppa)
+	if err != nil {
+		return fmt.Errorf("received a bogus tun name: %s", tun.name)
+	}
+
+	// Unclear why, but we need to open a second handle on the tun device for
+	// the ioctls that follow. Reusing the existing one does not work.
+	tunFD, err := unix.Open(tunNode, unix.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("Could not open TUN (%s)", tunNode)
+	}
+	defer unix.Close(tunFD)
+
+	// Push the IP module onto the TUN device.
+	if err = unix.IoctlSetString(tunFD, unix.I_PUSH, "ip"); err != nil {
+		return fmt.Errorf("unable to push IP module: %v", err)
+	}
+
+	// select which ppa we're using
+	req := int(unix.IF_UNITSEL)
+	err = unix.IoctlSetPointerInt(tunFD, uint(req), ppa)
+	if err != nil {
+		return fmt.Errorf("unable to IF_UNITSEL: %v", err)
+	}
+
+	// link the tun stream to the IP multiplexor
+	// If we used I_PLINK the connection would persist after we close the ipfd
+	// which causes cleanup issues. By using I_LINK and holding ipfd open,
+	// everything gets cleaned up nicely when we close the file descriptors
+	// or when the process terminates.
+	muxid, err := unix.IoctlSetIntRetInt(tun.ipfd, unix.I_LINK, tunFD)
+	if err != nil {
+		return fmt.Errorf("unable to I_LINK: %v", err)
+	}
+
+	var l unix.Lifreq
+	if err := l.SetName(tun.name); err != nil {
+		return fmt.Errorf("failed to set name on Lifreq :%v", err)
+	}
+
+	// set the IP muxid
+	reqnum := int(unix.SIOCSLIFMUXID)
+	l.SetLifruInt(muxid)
+	if err = unix.IoctlLifreq(tun.ipfd, uint(reqnum), &l); err != nil {
+		return fmt.Errorf("unable to SIOCSLIFMUXID: %v", err)
+	}
+
+	return nil
 }
 
 func (tun *NativeTun) Name() (string, error) {
@@ -289,27 +314,31 @@ func (tun *NativeTun) Flush() error {
 }
 
 func (tun *NativeTun) Close() error {
+	var err1, err2, err3 error
+	tun.closeOnce.Do(func() {
+		err1 = tun.tunFile.Close()
+		err2 = unix.Close(tun.ipfd)
+		if tun.routeSocket != -1 {
+			unix.Shutdown(tun.routeSocket, unix.SHUT_RDWR)
+			err3 = unix.Close(tun.routeSocket)
+			tun.routeSocket = -1
+		} else if tun.events != nil {
+			close(tun.events)
+		}
+	})
+	// Clean up anything remaining
+	// e.g. ipv6 addresses that were configured onto the device
 	tunDestroy(tun.name)
-
-	if tun.tunFile != nil {
-		tun.tunFile.Close()
-		tun.tunFile = nil
+	if err1 != nil {
+		return err1
 	}
-
-	if tun.events != nil {
-		close(tun.events)
+	if err2 != nil {
+		return err2
 	}
-
-	return nil
+	return err3
 }
 
 func (tun *NativeTun) setMTU(n int) error {
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(fd)
-
 	var l unix.Lifreq
 	if err := l.SetName(tun.name); err != nil {
 		return err
@@ -317,7 +346,7 @@ func (tun *NativeTun) setMTU(n int) error {
 
 	reqnum := int(unix.SIOCSLIFMTU)
 	l.SetLifruUint(uint(n))
-	if err = unix.IoctlLifreq(fd, uint(reqnum), &l); err != nil {
+	if err := unix.IoctlLifreq(tun.ipfd, uint(reqnum), &l); err != nil {
 		return fmt.Errorf("failed to set MTU on %s: %w", tun.name, err)
 	}
 
@@ -325,19 +354,13 @@ func (tun *NativeTun) setMTU(n int) error {
 }
 
 func (tun *NativeTun) MTU() (int, error) {
-	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM, 0)
-	if err != nil {
-		return 0, err
-	}
-	defer unix.Close(fd)
-
 	var l unix.Lifreq
 	if err := l.SetName(tun.name); err != nil {
 		return 0, err
 	}
 
 	reqnum := int(unix.SIOCGLIFMTU)
-	if err = unix.IoctlLifreq(fd, uint(reqnum), &l); err != nil {
+	if err := unix.IoctlLifreq(tun.ipfd, uint(reqnum), &l); err != nil {
 		return 0, fmt.Errorf("unable to SIOCGLIFMTU: %v", err)
 	}
 	return int(l.GetLifruUint()), nil
