@@ -33,8 +33,6 @@ type NativeTun struct {
 	closeOnce   sync.Once
 }
 
-// XXX This is largely copied from the freebsd code...
-// XXX How do I test if it is actually working?
 func (tun *NativeTun) routineRouteListener() {
 	var (
 		statusUp  bool
@@ -57,6 +55,9 @@ func (tun *NativeTun) routineRouteListener() {
 	}
 	defer unix.Close(routeSocket)
 
+	// XXX The code below, while likely correct, doesn't do anything.
+	// See https://www.illumos.org/issues/14206
+
 	data := make([]byte, os.Getpagesize())
 	for {
 	retry:
@@ -69,24 +70,22 @@ func (tun *NativeTun) routineRouteListener() {
 			return
 		}
 
-		if n < 14 {
+
+		if uintptr(n) < unsafe.Sizeof(unix.RtMsghdr{}) {
+			continue
+		}
+		msg := (*unix.RtMsghdr)(unsafe.Pointer(&data[0]))
+		if msg.Type != unix.RTM_IFINFO {
+			continue
+		}
+		if int(msg.Index) != tunIfindex {
 			continue
 		}
 
-		if data[3 /* type */] != unix.RTM_IFINFO {
-			continue
-		}
-		ifindex := int(*(*uint16)(unsafe.Pointer(&data[12 /* ifindex */])))
-		if ifindex != tunIfindex {
-			continue
-		}
-
-		iface, err := net.InterfaceByIndex(ifindex)
+		iface, err := net.InterfaceByIndex(tunIfindex)
 		if err != nil {
-			//tun.errors <- err
-			//return
-			// XXX returning this error breaks everything??
-			continue
+			tun.errors <- err
+			return
 		}
 
 		// Up / Down event
@@ -220,6 +219,10 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 		tun.Close()
 		return nil, err
 	}
+
+	// XXX see above comment about illumos issues 14206
+	tun.events <- EventUp
+	tun.events <- EventMTUUpdate
 
 	return tun, nil
 }
