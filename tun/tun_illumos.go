@@ -55,8 +55,8 @@ func (tun *NativeTun) routineRouteListener() {
 	}
 	defer unix.Close(routeSocket)
 
-	// XXX The code below, while likely correct, doesn't do anything.
-	// See https://www.illumos.org/issues/14206
+	// XXX The code below can detect MTU changes but depends on
+	// https://www.illumos.org/issues/14206
 
 	data := make([]byte, os.Getpagesize())
 	for {
@@ -70,19 +70,22 @@ func (tun *NativeTun) routineRouteListener() {
 			return
 		}
 
+		// You might expect to get a unix.RtMsghdr, but if the Type is RTM_IFINFO then
+		// it's really supposed to be parsed as a IfMsghdr
+		// See https://github.com/illumos/illumos-gate/blob/550b6e4/usr/src/cmd/cmd-inet/usr.sbin/route.c#L2614-L2620
 
-		if uintptr(n) < unsafe.Sizeof(unix.RtMsghdr{}) {
+		if uintptr(n) < unsafe.Sizeof(unix.IfMsghdr{}) {
 			continue
 		}
-		msg := (*unix.RtMsghdr)(unsafe.Pointer(&data[0]))
-		if msg.Type != unix.RTM_IFINFO {
+		msg := (*unix.IfMsghdr)(unsafe.Pointer(&data[0]))
+		if int(msg.Type) != unix.RTM_IFINFO {
 			continue
 		}
 		if int(msg.Index) != tunIfindex {
 			continue
 		}
 
-		iface, err := net.InterfaceByIndex(tunIfindex)
+		iface, err := net.InterfaceByName(tun.name)
 		if err != nil {
 			tun.errors <- err
 			return
@@ -220,8 +223,11 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 		return nil, err
 	}
 
-	// XXX see above comment about illumos issues 14206
+	// The interface always starts as up, so send the event
 	tun.events <- EventUp
+
+	// XXX see above comment about illumos issues 14206
+	// Always send an MTUUpdate event to at least ensure correct detection at startup
 	tun.events <- EventMTUUpdate
 
 	return tun, nil
