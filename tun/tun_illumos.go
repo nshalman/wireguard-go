@@ -317,7 +317,8 @@ func (tun *NativeTun) Read(buf []byte, offset int) (int, error) {
 }
 
 func (tun *NativeTun) Write(buf []byte, offset int) (int, error) {
-	if err := unix.Putmsg(tun.fd, nil, buf[offset:], 0); err != nil {
+	buf = buf[offset:]
+	if err := unix.Putmsg(tun.fd, nil, buf, 0); err != nil {
 		return 0, err
 	}
 	return len(buf), nil
