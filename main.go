@@ -30,7 +30,6 @@ const (
 	ENV_WG_TUN_FD             = "WG_TUN_FD"
 	ENV_WG_UAPI_FD            = "WG_UAPI_FD"
 	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
-	ENV_WG_TUN_NAME           = "WG_TUN_NAME"
 )
 
 func printUsage() {
@@ -130,8 +129,7 @@ func main() {
 			return nil, err
 		}
 
-		tunName := os.Getenv(ENV_WG_TUN_NAME)
-		file := os.NewFile(uintptr(fd), tunName)
+		file := os.NewFile(uintptr(fd), "")
 		return tun.CreateTUNFromFile(file, device.DefaultMTU)
 	}()
 
@@ -183,7 +181,6 @@ func main() {
 		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))
 		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))
 		env = append(env, fmt.Sprintf("%s=1", ENV_WG_PROCESS_FOREGROUND))
-		env = append(env, fmt.Sprintf("%s=%s", ENV_WG_TUN_NAME, interfaceName))
 		files := [3]*os.File{}
 		if os.Getenv("LOG_LEVEL") != "" && logLevel != device.LogLevelSilent {
 			files[0], _ = os.Open(os.DevNull)

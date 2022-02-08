@@ -177,18 +177,22 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	// Clean up anything possibly left behind by a crash
 	tunDestroy(assignedName)
 
-	file := os.NewFile(uintptr(fd), assignedName)
+	// The illumos tun driver doesn't have an ioctl for reading back the PPA.
+	// Just pass it through to the daemon process via environment variable.
+	err = os.Setenv("_WG_ILLUMOS_TUN_NAME", assignedName)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), "")
 	return CreateTUNFromFile(file, mtu)
 }
 
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
-	// Rather than do complicated gymnastics trying to determine which tunN
-	// we were using from the file descriptor, modify main.go to pass that
-	// along in an environment variable and set it as the Name() property
-	// of the os.File so that we can read it back here. Easy peasy.
-	name := file.Name()
+	// The illumos tun driver doesn't have an ioctl for reading back the PPA.
+	// Just get it back via environment variable.
+	name := os.Getenv("_WG_ILLUMOS_TUN_NAME")
 	if name == "" {
-		return nil, fmt.Errorf("could not determine device name from os.File")
+		return nil, fmt.Errorf("could not determine device name")
 	}
 
 	// By holding open this file descriptor on /dev/ip for the life of the connection
