@@ -184,7 +184,17 @@ func CreateTUN(name string, mtu int) (Device, error) {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(fd), "")
-	return CreateTUNFromFile(file, mtu)
+
+	tun, err := CreateTUNFromFile(file, mtu)
+
+	if err == nil && name == "tun" {
+		fname := os.Getenv("WG_TUN_NAME_FILE")
+		if fname != "" {
+			os.WriteFile(fname, []byte(tun.(*NativeTun).name+"\n"), 0o400)
+		}
+	}
+
+	return tun, err
 }
 
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
