@@ -88,7 +88,7 @@ func (tun *NativeTun) routineRouteListener() {
 			return
 		}
 
-		// Currently the illumos tun driver has two quirks that should be noted here
+		// Currently the solaris/illumos tun driver has two quirks that should be noted here
 		// 1. At creation time it immediately goes up before this code will have
 		// a chance to notice
 		// 2. It doesn't really respect 'ifconfig tunN down' properly so this code
@@ -130,7 +130,7 @@ func tunDestroy(name string) error {
 		// get the STREAMS muxid for the tun device stream
 		reqnum := int(unix.SIOCGLIFMUXID)
 
-		// illumos defines the ioctl number as a signed int, but the
+		// solaris/illumos defines the ioctl number as a signed int, but the
 		// common x/sys/unix functions use uint.
 		if err := unix.IoctlLifreq(fd, uint(reqnum), &l); err != nil {
 			continue
@@ -177,9 +177,9 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	// Clean up anything possibly left behind by a crash
 	tunDestroy(assignedName)
 
-	// The illumos tun driver doesn't have an ioctl for reading back the PPA.
+	// The solaris/illumos tun driver doesn't have an ioctl for reading back the PPA.
 	// Just pass it through to the daemon process via environment variable.
-	err = os.Setenv("_WG_ILLUMOS_TUN_NAME", assignedName)
+	err = os.Setenv("_WG_TUN_NAME", assignedName)
 	if err != nil {
 		return nil, err
 	}
@@ -198,9 +198,9 @@ func CreateTUN(name string, mtu int) (Device, error) {
 }
 
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
-	// The illumos tun driver doesn't have an ioctl for reading back the PPA.
+	// The solaris/illumos tun driver doesn't have an ioctl for reading back the PPA.
 	// Just get it back via environment variable.
-	name := os.Getenv("_WG_ILLUMOS_TUN_NAME")
+	name := os.Getenv("_WG_TUN_NAME")
 	if name == "" {
 		return nil, fmt.Errorf("could not determine device name")
 	}
