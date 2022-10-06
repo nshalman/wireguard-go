@@ -9,4 +9,4 @@ require (
 	golang.zx2c4.com/wintun v0.0.0-20211104114900-415007cec224
 )
 
-replace golang.org/x/sys => github.com/nshalman/sys v0.0.0-20221002153834-e7f8d0ebe900
+replace golang.org/x/sys => github.com/nshalman/sys v0.0.0-20221006010545-8b0bcf9e1b77
