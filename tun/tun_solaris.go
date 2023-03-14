@@ -261,20 +261,20 @@ func (tun *NativeTun) configureSTREAMS() error {
 
 	// Unclear why, but we need to open a second handle on the tun device for
 	// the ioctls that follow. Reusing the existing one does not work.
-	tunFD, err := unix.Open(tunNode, unix.O_RDWR, 0)
+	tunFd, err := unix.Open(tunNode, unix.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("could not open TUN (%s)", tunNode)
 	}
-	defer unix.Close(tunFD)
+	defer unix.Close(tunFd)
 
 	// Push the IP module onto the TUN device.
-	if err = unix.IoctlSetString(tunFD, unix.I_PUSH, "ip"); err != nil {
+	if err = unix.IoctlSetString(tunFd, unix.I_PUSH, "ip"); err != nil {
 		return fmt.Errorf("unable to push IP module: %v", err)
 	}
 
 	// select which ppa we're using
 	req := int(unix.IF_UNITSEL)
-	err = unix.IoctlSetPointerInt(tunFD, uint(req), ppa)
+	err = unix.IoctlSetPointerInt(tunFd, uint(req), ppa)
 	if err != nil {
 		return fmt.Errorf("unable to IF_UNITSEL: %v", err)
 	}
@@ -284,7 +284,7 @@ func (tun *NativeTun) configureSTREAMS() error {
 	// which causes cleanup issues. By using I_LINK and holding ipfd open,
 	// everything gets cleaned up nicely when we close the file descriptors
 	// or when the process terminates.
-	muxid, err := unix.IoctlSetIntRetInt(tun.ipfd, unix.I_LINK, tunFD)
+	muxid, err := unix.IoctlSetIntRetInt(tun.ipfd, unix.I_LINK, tunFd)
 	if err != nil {
 		return fmt.Errorf("unable to I_LINK: %v", err)
 	}
