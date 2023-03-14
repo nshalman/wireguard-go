@@ -316,12 +316,12 @@ func (tun *NativeTun) Events() <-chan Event {
 	return tun.events
 }
 
-func (tun *NativeTun) Read(buffs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		_, read, _, err := unix.Getmsg(tun.fd, nil, buffs[0][offset:])
+		_, read, _, err := unix.Getmsg(tun.fd, nil, bufs[0][offset:])
 		if err != nil {
 			return 0, err
 		}
@@ -330,14 +330,14 @@ func (tun *NativeTun) Read(buffs [][]byte, sizes []int, offset int) (int, error)
 	}
 }
 
-func (tun *NativeTun) Write(buffs [][]byte, offset int) (int, error) {
-	for i, buf := range buffs {
+func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
+	for i, buf := range bufs {
 		buf = buf[offset:]
 		if err := unix.Putmsg(tun.fd, nil, buf, 0); err != nil {
 			return i, err
 		}
 	}
-	return len(buffs), nil
+	return len(bufs), nil
 }
 
 func (tun *NativeTun) Close() error {
