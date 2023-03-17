@@ -127,11 +127,7 @@ func tunDestroy(name string) error {
 		defer unix.Close(fd)
 
 		// get the STREAMS muxid for the tun device stream
-		reqnum := int(unix.SIOCGLIFMUXID)
-
-		// solaris/illumos defines the ioctl number as a signed int, but the
-		// common x/sys/unix functions use uint.
-		if err := unix.IoctlLifreq(fd, uint(reqnum), &l); err != nil {
+		if err := unix.IoctlLifreq(fd, unix.SIOCGLIFMUXID, &l); err != nil {
 			continue
 		}
 
@@ -273,8 +269,7 @@ func (tun *NativeTun) configureSTREAMS() error {
 	}
 
 	// select which ppa we're using
-	req := int(unix.IF_UNITSEL)
-	err = unix.IoctlSetPointerInt(tunFd, uint(req), ppa)
+	err = unix.IoctlSetPointerInt(tunFd, unix.IF_UNITSEL, ppa)
 	if err != nil {
 		return fmt.Errorf("unable to IF_UNITSEL: %v", err)
 	}
@@ -295,9 +290,8 @@ func (tun *NativeTun) configureSTREAMS() error {
 	}
 
 	// set the IP muxid
-	reqnum := int(unix.SIOCSLIFMUXID)
 	l.SetLifruInt(muxid)
-	if err = unix.IoctlLifreq(tun.ipfd, uint(reqnum), &l); err != nil {
+	if err = unix.IoctlLifreq(tun.ipfd, unix.SIOCSLIFMUXID, &l); err != nil {
 		return fmt.Errorf("unable to SIOCSLIFMUXID: %v", err)
 	}
 
@@ -371,9 +365,8 @@ func (tun *NativeTun) setMTU(n int) error {
 		return err
 	}
 
-	reqnum := int(unix.SIOCSLIFMTU)
 	l.SetLifruUint(uint(n))
-	if err := unix.IoctlLifreq(tun.ipfd, uint(reqnum), &l); err != nil {
+	if err := unix.IoctlLifreq(tun.ipfd, unix.SIOCSLIFMTU, &l); err != nil {
 		return fmt.Errorf("failed to set MTU on %s: %w", tun.name, err)
 	}
 
@@ -386,8 +379,7 @@ func (tun *NativeTun) MTU() (int, error) {
 		return 0, err
 	}
 
-	reqnum := int(unix.SIOCGLIFMTU)
-	if err := unix.IoctlLifreq(tun.ipfd, uint(reqnum), &l); err != nil {
+	if err := unix.IoctlLifreq(tun.ipfd, unix.SIOCGLIFMTU, &l); err != nil {
 		return 0, fmt.Errorf("unable to SIOCGLIFMTU: %v", err)
 	}
 	return int(l.GetLifruUint()), nil
