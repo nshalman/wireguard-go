@@ -368,6 +368,8 @@ func (device *Device) RemoveAllPeers() {
 }
 
 func (device *Device) Close() {
+	device.ipcMutex.Lock()
+	defer device.ipcMutex.Unlock()
 	device.state.Lock()
 	defer device.state.Unlock()
 	if device.isClosed() {
@@ -459,11 +461,7 @@ func (device *Device) BindSetMark(mark uint32) error {
 	// clear cached source addresses
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
-		peer.Lock()
-		defer peer.Unlock()
-		if peer.endpoint != nil {
-			peer.endpoint.ClearSrc()
-		}
+		peer.markEndpointSrcForClearing()
 	}
 	device.peers.RUnlock()
 
@@ -513,11 +511,7 @@ func (device *Device) BindUpdate() error {
 	// clear cached source addresses
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
-		peer.Lock()
-		defer peer.Unlock()
-		if peer.endpoint != nil {
-			peer.endpoint.ClearSrc()
-		}
+		peer.markEndpointSrcForClearing()
 	}
 	device.peers.RUnlock()
 
