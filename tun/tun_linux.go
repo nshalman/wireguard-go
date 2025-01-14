@@ -38,7 +38,6 @@ type NativeTun struct {
 	statusListenersShutdown chan struct{}
 	batchSize               int
 	vnetHdr                 bool
-	udpGSO                  bool
 
 	closeOnce sync.Once
 
@@ -53,7 +52,30 @@ type NativeTun struct {
 	toWrite     []int
 	tcpGROTable *tcpGROTable
 	udpGROTable *udpGROTable
-	udpGRO      bool
+	gro         groDisablementFlags
+}
+
+type groDisablementFlags int
+
+const (
+	tcpGRODisabled groDisablementFlags = 1 << iota
+	udpGRODisabled
+)
+
+func (g *groDisablementFlags) disableTCPGRO() {
+	*g |= tcpGRODisabled
+}
+
+func (g *groDisablementFlags) canTCPGRO() bool {
+	return (*g)&tcpGRODisabled == 0
+}
+
+func (g *groDisablementFlags) disableUDPGRO() {
+	*g |= udpGRODisabled
+}
+
+func (g *groDisablementFlags) canUDPGRO() bool {
+	return (*g)&udpGRODisabled == 0
 }
 
 func (tun *NativeTun) File() *os.File {
@@ -247,21 +269,15 @@ func (tun *NativeTun) setMTU(n int) error {
 
 	defer unix.Close(fd)
 
-	// do ioctl call
-	var ifr [ifReqSize]byte
-	copy(ifr[:], name)
-	*(*uint32)(unsafe.Pointer(&ifr[unix.IFNAMSIZ])) = uint32(n)
-	_, _, errno := unix.Syscall(
-		unix.SYS_IOCTL,
-		uintptr(fd),
-		uintptr(unix.SIOCSIFMTU),
-		uintptr(unsafe.Pointer(&ifr[0])),
-	)
-
-	if errno != 0 {
-		return fmt.Errorf("failed to set MTU of TUN device: %w", errno)
+	req, err := unix.NewIfreq(name)
+	if err != nil {
+		return fmt.Errorf("unix.NewIfreq(%q): %w", name, err)
 	}
-
+	req.SetUint32(uint32(n))
+	err = unix.IoctlIfreq(fd, unix.SIOCSIFMTU, req)
+	if err != nil {
+		return fmt.Errorf("failed to set MTU of TUN device %q: %w", name, err)
+	}
 	return nil
 }
 
@@ -346,7 +362,7 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 	)
 	tun.toWrite = tun.toWrite[:0]
 	if tun.vnetHdr {
-		err := handleGRO(bufs, offset, tun.tcpGROTable, tun.udpGROTable, tun.udpGRO, &tun.toWrite)
+		err := handleGRO(bufs, offset, tun.tcpGROTable, tun.udpGROTable, tun.gro, &tun.toWrite)
 		if err != nil {
 			return 0, err
 		}
@@ -462,9 +478,19 @@ func (tun *NativeTun) BatchSize() int {
 	return tun.batchSize
 }
 
+// DisableUDPGRO disables UDP GRO if it is enabled. See the GRODevice interface
+// for cases where it should be called.
 func (tun *NativeTun) DisableUDPGRO() {
 	tun.writeOpMu.Lock()
-	tun.udpGRO = false
+	tun.gro.disableUDPGRO()
+	tun.writeOpMu.Unlock()
+}
+
+// DisableTCPGRO disables TCP GRO if it is enabled. See the GRODevice interface
+// for cases where it should be called.
+func (tun *NativeTun) DisableTCPGRO() {
+	tun.writeOpMu.Lock()
+	tun.gro.disableTCPGRO()
 	tun.writeOpMu.Unlock()
 }
 
@@ -503,8 +529,9 @@ func (tun *NativeTun) initFromFlags(name string) error {
 			tun.batchSize = conn.IdealBatchSize
 			// tunUDPOffloads were added in Linux v6.2. We do not return an
 			// error if they are unsupported at runtime.
-			tun.udpGSO = unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads) == nil
-			tun.udpGRO = tun.udpGSO
+			if unix.IoctlSetInt(int(fd), unix.TUNSETOFFLOAD, tunTCPOffloads|tunUDPOffloads) != nil {
+				tun.gro.disableUDPGRO()
+			}
 		} else {
 			tun.batchSize = 1
 		}
