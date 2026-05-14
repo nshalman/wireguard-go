@@ -6,6 +6,8 @@
 package device
 
 import (
+	"errors"
+	"net/netip"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -56,6 +58,7 @@ type Device struct {
 	peers struct {
 		sync.RWMutex // protects keyMap
 		keyMap       map[NoisePublicKey]*Peer
+		lookupFunc   PeerLookupFunc // or nil if unused
 	}
 
 	rate struct {
@@ -179,14 +182,22 @@ func (device *Device) upLocked() error {
 	device.ipcMutex.Lock()
 	defer device.ipcMutex.Unlock()
 
+	// Collect peers under RLock and then release before calling into them,
+	// because SendKeepalive can reach CreateMessageInitiation which acquires
+	// staticIdentity.RLock; holding peers.RLock across that path would
+	// invert the staticIdentity < peers hierarchy (see lock-ordering.md).
 	device.peers.RLock()
+	peers := make([]*Peer, 0, len(device.peers.keyMap))
 	for _, peer := range device.peers.keyMap {
+		peers = append(peers, peer)
+	}
+	device.peers.RUnlock()
+	for _, peer := range peers {
 		peer.Start()
 		if peer.persistentKeepaliveInterval.Load() > 0 {
 			peer.SendKeepalive()
 		}
 	}
-	device.peers.RUnlock()
 	return nil
 }
 
@@ -338,12 +349,65 @@ func (device *Device) BatchSize() int {
 	return size
 }
 
+// LookupPeer looks up a peer by its public key.
+//
+// If the peer does not exist and a [PeerLookupFunc] is set (via
+// [Device.SetPeerLookupFunc]), then that function is used to create the peer
+// before returning it. Peers created via this mechanism exist only until their
+// state machine reaches idle, and then the peers are removed.
+//
+// If the peer does not exist and no [PeerLookupFunc] is set, nil is returned.
+//
+// Use [Device.LookupActivePeer] to only return already-existing peers, without
+// using a [PeerLookupFunc].
 func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 	device.peers.RLock()
-	defer device.peers.RUnlock()
+	p, ok := device.peers.keyMap[pk]
+	lookupFunc := device.peers.lookupFunc
+	device.peers.RUnlock()
+	if ok || lookupFunc == nil {
+		return p
+	}
 
-	return device.peers.keyMap[pk]
+	conf, ok := lookupFunc(pk)
+	if !ok || conf == nil {
+		return nil
+	}
+
+	p, err := device.NewPeer(pk)
+	if err != nil {
+		if errors.Is(err, errAddExistingPeer) {
+			device.peers.RLock()
+			defer device.peers.RUnlock()
+			return device.peers.keyMap[pk]
+		}
+		device.log.Errorf("Failed to create peer: %v", err)
+		return nil
+	}
+	p.SetAllowedIPs(conf.AllowedIPs)
+	p.deleteOnIdle = true
+	if conf.Endpoint != nil {
+		p.SetEndpointFromPacket(conf.Endpoint)
+	}
+	p.Start()
+	return p
 }
+
+// LookupActivePeer looks up a peer by its public key.
+//
+// Unlike [Device.LookupPeer], this function does not use a [PeerLookupFunc] to
+// create the peer if it does not already exist.
+//
+// If the peer does not exist or was created lazily via [PeerLookupFunc]
+// and has subsequently idled away, it returns (nil, false).
+func (device *Device) LookupActivePeer(pk NoisePublicKey) (_ *Peer, ok bool) {
+	device.peers.RLock()
+	defer device.peers.RUnlock()
+	p, ok := device.peers.keyMap[pk]
+	return p, ok
+}
+
+var errAddExistingPeer = errors.New("adding existing peer")
 
 func (device *Device) RemovePeer(key NoisePublicKey) {
 	device.peers.Lock()
@@ -365,6 +429,75 @@ func (device *Device) RemoveAllPeers() {
 	}
 
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
+}
+
+// RemoveMatchingPeers removes all peers for which shouldRemove returns true.
+//
+// It returns the number of peers removed.
+func (device *Device) RemoveMatchingPeers(shouldRemove func(NoisePublicKey) bool) (numRemoved int) {
+	device.peers.Lock()
+	defer device.peers.Unlock()
+
+	for key, peer := range device.peers.keyMap {
+		if shouldRemove(key) {
+			removePeerLocked(device, peer, key)
+			numRemoved++
+		}
+	}
+	return numRemoved
+}
+
+// NewPeerConfig are the configuration parameters for a new peer created via a
+// [PeerLookupFunc] func.
+type NewPeerConfig struct {
+	// AllowedIPs is the initial set of allowed IPs for the new peer.
+	AllowedIPs []netip.Prefix
+
+	// Endpoint, if non-nil, sets the initial endpoint for newly
+	// created peers.
+	Endpoint conn.Endpoint
+}
+
+// PeerLookupFunc is the type of function used to look up peers by public key
+// when receiving packets for unknown peers.
+//
+// If it returns nil, the peer is not known.
+//
+// Otherwise, returning non-nil signals that wireguard-go should create the peer
+// with the provided allowed IPs.
+//
+// See [Device.SetPeerLookupFunc] and [Device.LookupPeer].
+type PeerLookupFunc func(NoisePublicKey) (_ *NewPeerConfig, ok bool)
+
+// PeerByIPPacketFunc is the type of function used to look up a peer to send to
+// for a given src/dst IP pair. The ipPkt parameter is the raw IP packet being
+// routed; callers needing transport-layer ports or other header fields may parse
+// them from ipPkt, but must handle IP fragmentation (ports may be absent on
+// non-first fragments) and protocols that do not use ports (e.g. ICMP).
+//
+// Except for experimental use cases, dst is the only address
+// that should be relied upon when looking up a peer.
+//
+// If it returns ok=false, the peer is not known.
+//
+// See [Device.SetPeerByIPPacketFunc] and [Device.SetPeerLookupFunc].
+type PeerByIPPacketFunc func(src, dst netip.Addr, ipPkt []byte) (_ NoisePublicKey, ok bool)
+
+// SetPeerLookupFunc sets the function used to look up peers by public key
+// when receiving packets for unknown peers.
+func (device *Device) SetPeerLookupFunc(f PeerLookupFunc) {
+	device.peers.Lock()
+	defer device.peers.Unlock()
+	device.peers.lookupFunc = f
+}
+
+// SetPeerByIPPacketFunc sets the function used to look up peers by IP address
+// when sending packets to unknown peers.
+func (device *Device) SetPeerByIPPacketFunc(f PeerByIPPacketFunc) {
+	device.allowedips.mu.Lock()
+	defer device.allowedips.mu.Unlock()
+	device.allowedips.peerByIPPacketFunc = f
+	device.allowedips.device = device
 }
 
 func (device *Device) Close() {
@@ -408,16 +541,25 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 		return
 	}
 
+	// Collect the set of peers to keepalive under peers.RLock, then release
+	// before invoking SendKeepalive. SendKeepalive can reach
+	// CreateMessageInitiation which acquires staticIdentity.RLock; holding
+	// peers.RLock across that path would invert the
+	// staticIdentity < peers hierarchy (see lock-ordering.md).
+	var peers []*Peer
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
 		peer.keypairs.RLock()
 		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(RejectAfterTime).Before(time.Now())
 		peer.keypairs.RUnlock()
 		if sendKeepalive {
-			peer.SendKeepalive()
+			peers = append(peers, peer)
 		}
 	}
 	device.peers.RUnlock()
+	for _, peer := range peers {
+		peer.SendKeepalive()
+	}
 }
 
 // closeBindLocked closes the device's net.bind.
