@@ -35,9 +35,8 @@ type Peer struct {
 
 	endpoint struct {
 		sync.Mutex
-		val            conn.Endpoint
-		clearSrcOnTx   bool // signal to val.ClearSrc() prior to next packet transmission
-		disableRoaming bool
+		val          conn.Endpoint
+		clearSrcOnTx bool // signal to val.ClearSrc() prior to next packet transmission
 	}
 
 	timers struct {
@@ -115,7 +114,6 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	// reset endpoint
 	peer.endpoint.Lock()
 	peer.endpoint.val = nil
-	peer.endpoint.disableRoaming = false
 	peer.endpoint.clearSrcOnTx = false
 	peer.endpoint.Unlock()
 
@@ -248,6 +246,14 @@ func (peer *Peer) Start() {
 	go peer.RoutineSequentialReceiver(batchSize)
 
 	peer.isRunning.Store(true)
+
+	// A lazily-created peer that never completes a handshake otherwise never
+	// arms its reaping timer. Arm it here, while running under state.Lock, so
+	// it's reclaimed after RejectAfterTime*3 of no session and is guaranteed to
+	// be torn down by a matching Stop. A completed handshake re-Mods it.
+	if peer.deleteOnIdle {
+		peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
+	}
 }
 
 func (peer *Peer) ZeroAndFlushAll() {
@@ -313,16 +319,6 @@ func (peer *Peer) Stop() {
 	peer.device.queue.encryption.wg.Done() // no more writes to encryption queue from us
 
 	peer.ZeroAndFlushAll()
-}
-
-func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
-	peer.endpoint.Lock()
-	defer peer.endpoint.Unlock()
-	if peer.endpoint.disableRoaming {
-		return
-	}
-	peer.endpoint.clearSrcOnTx = false
-	peer.endpoint.val = endpoint
 }
 
 func (peer *Peer) markEndpointSrcForClearing() {
