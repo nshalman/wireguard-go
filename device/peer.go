@@ -27,6 +27,12 @@ type Peer struct {
 	rxBytes           atomic.Uint64  // bytes received from peer
 	lastHandshakeNano atomic.Int64   // nano seconds since epoch
 
+	sessionState struct {
+		sync.Mutex
+		current        PeerSessionState
+		sessionExpires time.Time
+	}
+
 	// deleteOnIdle indicates whether the peer should be deleted when idle
 	// because it was auto-created via a Device.PeerLookupFunc.
 	//
@@ -43,6 +49,7 @@ type Peer struct {
 		retransmitHandshake     *Timer
 		sendKeepalive           *Timer
 		newHandshake            *Timer
+		sessionExpired          *Timer
 		zeroKeyMaterial         *Timer
 		persistentKeepalive     *Timer
 		handshakeAttempts       atomic.Uint32
@@ -236,8 +243,8 @@ func (peer *Peer) Start() {
 
 	peer.timersStart()
 
-	device.flushInboundQueue(peer.queue.inbound)
-	device.flushOutboundQueue(peer.queue.outbound)
+	device.flushInboundQueue(peer.queue.inbound.c)
+	device.flushOutboundQueue(peer.queue.outbound.c)
 
 	// Use the device batch size, not the bind batch size, as the device size is
 	// the size of the batch pools.
@@ -258,6 +265,9 @@ func (peer *Peer) Start() {
 
 func (peer *Peer) ZeroAndFlushAll() {
 	device := peer.device
+	if peer.timers.sessionExpired != nil {
+		peer.timers.sessionExpired.Del()
+	}
 
 	// clear key pairs
 
@@ -280,6 +290,11 @@ func (peer *Peer) ZeroAndFlushAll() {
 	handshake.mutex.Unlock()
 
 	peer.FlushStagedPackets()
+
+	peer.sessionState.Lock()
+	peer.sessionState.sessionExpires = time.Time{}
+	peer.noteSessionStateLocked(PeerSessionNone)
+	peer.sessionState.Unlock()
 }
 
 func (peer *Peer) ExpireCurrentKeypairs() {
@@ -299,6 +314,11 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 		next.sendNonce.Store(RejectAfterMessages)
 	}
 	keypairs.Unlock()
+
+	peer.sessionState.Lock()
+	peer.sessionState.sessionExpires = time.Time{}
+	peer.noteSessionStateLocked(PeerSessionExpired)
+	peer.sessionState.Unlock()
 }
 
 func (peer *Peer) Stop() {
@@ -319,6 +339,51 @@ func (peer *Peer) Stop() {
 	peer.device.queue.encryption.wg.Done() // no more writes to encryption queue from us
 
 	peer.ZeroAndFlushAll()
+}
+
+func (peer *Peer) noteSessionState(state PeerSessionState) {
+	peer.sessionState.Lock()
+	defer peer.sessionState.Unlock()
+	peer.noteSessionStateLocked(state)
+}
+
+// noteSessionStateLocked records a session state transition and delivers the
+// callback. The caller must hold peer.sessionState.Mutex during the
+// state determination and transition.
+func (peer *Peer) noteSessionStateLocked(state PeerSessionState) {
+	if peer.sessionState.current == state {
+		return
+	}
+	peer.sessionState.current = state
+	if f := peer.device.peerStateFn.Load(); f != nil {
+		(*f)(peer.handshake.remoteStatic, state)
+	}
+}
+
+func (peer *Peer) noteSessionHandshakeStarted() {
+	peer.sessionState.Lock()
+	defer peer.sessionState.Unlock()
+	if peer.sessionState.current == PeerSessionEstablished {
+		return
+	}
+	peer.noteSessionStateLocked(PeerSessionHandshake)
+}
+
+func (peer *Peer) noteSessionHandshakeStopped() {
+	peer.sessionState.Lock()
+	defer peer.sessionState.Unlock()
+	state := PeerSessionNone
+	if peer.hasKeyMaterial() {
+		state = PeerSessionExpired
+	}
+	peer.noteSessionStateLocked(state)
+}
+
+func (peer *Peer) hasKeyMaterial() bool {
+	keypairs := &peer.keypairs
+	keypairs.RLock()
+	defer keypairs.RUnlock()
+	return keypairs.previous != nil || keypairs.current != nil || keypairs.next.Load() != nil
 }
 
 func (peer *Peer) markEndpointSrcForClearing() {

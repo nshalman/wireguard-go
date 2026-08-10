@@ -86,6 +86,7 @@ var trackedLocks = []TrackedLock{
 	{ID: "Peer.keypairs", OwnerType: "Peer", FieldPath: "keypairs", Kind: ReadWriteMutex, DefType: "Keypairs", DefPath: ""},
 	{ID: "Peer.endpoint", OwnerType: "Peer", FieldPath: "endpoint", Kind: PlainMutex, DefType: "Peer", DefPath: "endpoint"},
 	{ID: "Peer.cookieGenerator", OwnerType: "Peer", FieldPath: "cookieGenerator", Kind: ReadWriteMutex, DefType: "CookieGenerator", DefPath: ""},
+	{ID: "Peer.sessionState", OwnerType: "Peer", FieldPath: "sessionState", Kind: PlainMutex, DefType: "Peer", DefPath: "sessionState"},
 	{ID: "Timer.modifyingLock", OwnerType: "Timer", FieldPath: "modifyingLock", Kind: ReadWriteMutex, DefType: "Timer", DefPath: "modifyingLock"},
 	{ID: "Timer.runningLock", OwnerType: "Timer", FieldPath: "runningLock", Kind: PlainMutex, DefType: "Timer", DefPath: "runningLock"},
 	{ID: "WaitPool.lock", OwnerType: "WaitPool", FieldPath: "lock", Kind: PlainMutex, DefType: "WaitPool", DefPath: "lock"},
