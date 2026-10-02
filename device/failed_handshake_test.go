@@ -15,7 +15,11 @@ import (
 	"github.com/tailscale/wireguard-go/tun/tuntest"
 )
 
-func newSynctestDevice(tb testing.TB) *Device {
+// newSynctestCapableDevice returns a [Device] that is safe to use within a
+// synctest bubble. It uses channel-based [conn.Bind]s instead of goroutines
+// performing "real" I/O, which can never durably block. The returned [Device]
+// is registered to Close() at tb.Cleanup time.
+func newSynctestCapableDevice(tb testing.TB, opts ...Option) *Device {
 	tb.Helper()
 	sk, err := newPrivateKey()
 	if err != nil {
@@ -23,7 +27,7 @@ func newSynctestDevice(tb testing.TB) *Device {
 	}
 	binds := bindtest.NewChannelBinds()
 	tun := tuntest.NewChannelTUN()
-	dev := NewDevice(tun.TUN(), binds[0], NewLogger(LogLevelError, ""))
+	dev := NewDevice(tun.TUN(), binds[0], NewLogger(LogLevelError, ""), opts...)
 	dev.SetPrivateKey(sk)
 	tb.Cleanup(dev.Close)
 	return dev
@@ -31,7 +35,7 @@ func newSynctestDevice(tb testing.TB) *Device {
 
 func TestLazyPeerReaping(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		dev := newSynctestDevice(t)
+		dev := newSynctestCapableDevice(t)
 		dev.SetPeerLookupFunc(func(pk NoisePublicKey) (*NewPeerConfig, bool) {
 			ip := netip.AddrFrom4([4]byte{10, pk[0], pk[1], pk[2]})
 			return &NewPeerConfig{AllowedIPs: []netip.Prefix{netip.PrefixFrom(ip, 32)}}, true

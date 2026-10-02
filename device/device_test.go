@@ -8,6 +8,7 @@ package device
 import (
 	"bytes"
 	"encoding/hex"
+	"expvar"
 	"fmt"
 	"io"
 	"math/rand"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
@@ -149,7 +151,11 @@ func (pair *testPair) Send(tb testing.TB, ping SendDirection, done chan struct{}
 }
 
 // genTestPair creates a testPair.
-func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
+func genTestPair(tb testing.TB, realSocket bool, opts ...Option) (pair testPair) {
+	return genTestPairQueues(tb, realSocket, 1, opts...)
+}
+
+func genTestPairQueues(tb testing.TB, realSocket bool, queues int, opts ...Option) (pair testPair) {
 	cfg, endpointCfg := genConfigs(tb)
 	var binds [2]conn.Bind
 	if realSocket {
@@ -160,13 +166,13 @@ func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
 	// Bring up a ChannelTun for each config.
 	for i := range pair {
 		p := &pair[i]
-		p.tun = tuntest.NewChannelTUN()
+		p.tun = tuntest.NewMultiQueueChannelTUN(queues)
 		p.ip = netip.AddrFrom4([4]byte{1, 0, 0, byte(i + 1)})
 		level := LogLevelVerbose
 		if _, ok := tb.(*testing.B); ok && !testing.Verbose() {
 			level = LogLevelError
 		}
-		p.dev = NewDevice(p.tun.TUN(), binds[i], NewLogger(level, fmt.Sprintf("dev%d: ", i)))
+		p.dev = NewDevice(p.tun.TUN(), binds[i], NewLogger(level, fmt.Sprintf("dev%d: ", i)), opts...)
 		if err := p.dev.IpcSet(cfg[i]); err != nil {
 			tb.Errorf("failed to configure device %d: %v", i, err)
 			p.dev.Close()
@@ -272,9 +278,21 @@ func TestPriorityMessageOnEstablishment(t *testing.T) {
 	}
 }
 
-func TestTwoDevicePing(t *testing.T) {
+func forEachQueueCount(t *testing.T, fn func(t *testing.T, queues int)) {
+	t.Helper()
+	var testQueueCounts = []int{1, 4}
+	for _, queues := range testQueueCounts {
+		t.Run(fmt.Sprintf("queues=%d", queues), func(t *testing.T) {
+			fn(t, queues)
+		})
+	}
+}
+
+func TestTwoDevicePing(t *testing.T) { forEachQueueCount(t, testTwoDevicePing) }
+
+func testTwoDevicePing(t *testing.T, queues int) {
 	goroutineLeakCheck(t)
-	pair := genTestPair(t, true)
+	pair := genTestPairQueues(t, true, queues)
 	t.Run("ping 1.0.0.1", func(t *testing.T) {
 		pair.Send(t, Ping, nil)
 	})
@@ -283,13 +301,15 @@ func TestTwoDevicePing(t *testing.T) {
 	})
 }
 
-func TestUpDown(t *testing.T) {
+func TestUpDown(t *testing.T) { forEachQueueCount(t, testUpDown) }
+
+func testUpDown(t *testing.T, queues int) {
 	goroutineLeakCheck(t)
 	const itrials = 50
 	const otrials = 10
 
 	for n := 0; n < otrials; n++ {
-		pair := genTestPair(t, false)
+		pair := genTestPairQueues(t, false, queues)
 		for i := range pair {
 			for k := range pair[i].dev.peers.keyMap {
 				pair[i].dev.IpcSet(fmt.Sprintf("public_key=%s\npersistent_keepalive_interval=1\n", hex.EncodeToString(k[:])))
@@ -322,8 +342,10 @@ func TestUpDown(t *testing.T) {
 
 // TestConcurrencySafety does other things concurrently with tunnel use.
 // It is intended to be used with the race detector to catch data races.
-func TestConcurrencySafety(t *testing.T) {
-	pair := genTestPair(t, true)
+func TestConcurrencySafety(t *testing.T) { forEachQueueCount(t, testConcurrencySafety) }
+
+func testConcurrencySafety(t *testing.T, queues int) {
+	pair := genTestPairQueues(t, true, queues)
 	done := make(chan struct{})
 
 	const warmupIters = 10
@@ -517,7 +539,7 @@ type fakeTUNDeviceSized struct {
 }
 
 func (t *fakeTUNDeviceSized) File() *os.File { return nil }
-func (t *fakeTUNDeviceSized) Read(bufs [][]byte, sizes []int, offset int) (n int, err error) {
+func (t *fakeTUNDeviceSized) Read(slab []byte, packets []tun.ReadPacket) (n int, err error) {
 	return 0, nil
 }
 func (t *fakeTUNDeviceSized) Write(bufs [][]byte, offset int) (int, error) { return 0, nil }
@@ -553,4 +575,312 @@ func TestBatchSize(t *testing.T) {
 	if want, got := 128, d.BatchSize(); got != want {
 		t.Errorf("expected batch size %d, got %d", want, got)
 	}
+}
+
+// BenchmarkQueueOutboundIfRunning benchmarks [Peer.queueOutboundIfRunning]
+// alongside alternative approaches.
+func BenchmarkQueueOutboundIfRunning(b *testing.B) {
+	p := &Peer{device: &Device{}}
+	p.runningState.isRunning.Store(true)
+	elems := &QueueOutboundElementsContainer{}
+	initChannels := func(b *testing.B) {
+		p.device.queue.encryption = &outboundQueue{c: make(chan *QueueOutboundElementsContainer, b.N)}
+		p.queue.outbound = make(chan *QueueOutboundElementsContainer, b.N)
+	}
+
+	b.Run("queueOutboundIfRunning", func(b *testing.B) {
+		initChannels(b)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			p.queueOutboundIfRunning(elems)
+		}
+	})
+
+	// This is equivalent to the logic that preceded [Peer.queueOutboundIfRunning].
+	// The atomic load raced with [Peer.Stop], making it deadlock and leak
+	// prone.
+	b.Run("racey-load-bare-write", func(b *testing.B) {
+		initChannels(b)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			if p.runningState.isRunning.Load() {
+				elems.filling.Add(1)
+				p.queue.outbound <- elems
+				p.device.queue.encryption.c <- elems
+			}
+		}
+	})
+
+	// Adding a select{} is a valid and correct alternative approach to
+	// [Peer.queueOutboundIfRunning], but select{} with multi-channel cases
+	// tends to underperform the atomics-based approach.
+	b.Run("2-channel-select", func(b *testing.B) {
+		initChannels(b)
+		closedCh := make(chan struct{})
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			elems.filling.Add(1)
+			select {
+			case p.queue.outbound <- elems:
+			case <-closedCh:
+			}
+			p.device.queue.encryption.c <- elems
+		}
+	})
+}
+
+func TestPeerIfRunningWaitQueueActors(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		device := newSynctestCapableDevice(t)
+		peer := &Peer{device: device}
+		// unbuffered so we can durably block and verify [Peer.waitQueueActors]
+		// drains.
+		peer.queue.inbound = make(chan *QueueInboundElementsContainer)
+		peer.queue.outbound = make(chan *QueueOutboundElementsContainer)
+
+		// mark peer as running
+		peer.runningState.isRunning.Store(true)
+
+		elems := device.GetOutboundElementsContainer()
+		actorDone := make(chan bool, 1)
+		go func() {
+			actorDone <- peer.doIfRunning(func() {
+				peer.queue.outbound <- elems
+			})
+		}()
+
+		// actor should be blocked writing to the unbuffered channel
+		synctest.Wait()
+		if got := peer.runningState.queueWriters.Load(); got != 1 {
+			t.Fatalf("queue writers = %d, want 1", got)
+		}
+
+		// mark peer as stopping
+		peer.runningState.isRunning.Store(false)
+
+		// waitQueueActors should drain the channel, unblock the actor, and
+		// wait until it exits its critical section
+		peer.waitQueueActors()
+
+		if ran := <-actorDone; !ran {
+			t.Fatal("ifRunning crit did not run")
+		}
+		if got := peer.runningState.queueWriters.Load(); got != 0 {
+			t.Fatalf("queue writers = %d, want 0", got)
+		}
+	})
+}
+
+func TestDeviceConfig(t *testing.T) {
+	c := defaultConfig()
+	if c.queueStagedSize != DefaultQueueStagedSize ||
+		c.queueOutboundSize != DefaultQueueOutboundSize ||
+		c.queueInboundSize != DefaultQueueInboundSize ||
+		c.queueHandshakeSize != DefaultQueueHandshakeSize ||
+		c.preallocatedBuffersPerPool != DefaultPreallocatedBuffersPerPool {
+		t.Fatalf("default device config: %+v", c)
+	}
+
+}
+
+func TestDeviceOptions(t *testing.T) {
+	c := defaultConfig()
+	opts := []Option{
+		WithQueueStagedSize(1),
+		WithQueueOutboundSize(2),
+		WithQueueInboundSize(3),
+		WithQueueHandshakeSize(4),
+		WithPreallocatedBuffersPerPool(5),
+	}
+	for _, opt := range opts {
+		opt.apply(&c)
+	}
+	if c.queueStagedSize != 1 ||
+		c.queueOutboundSize != 2 ||
+		c.queueInboundSize != 3 ||
+		c.queueHandshakeSize != 4 ||
+		c.preallocatedBuffersPerPool != 5 {
+		t.Fatalf("configured device config: %+v", c)
+	}
+}
+
+func TestPopulatePoolsPacketBufs(t *testing.T) {
+	wantSingleSmallSize := singlePacketSlabSize
+	wantSingleDistinct := singlePacketSlabSize >= minPacketBufSizeForDistinctSmallPool
+	if wantSingleDistinct {
+		wantSingleSmallSize = smallPacketBufSize
+	}
+
+	tests := []struct {
+		name           string
+		batchSize      int
+		preallocated   uint32
+		wantDistinct   bool
+		wantPacketSize int
+		wantSmallSize  int
+	}{
+		{
+			name:           "single unbounded",
+			batchSize:      1,
+			preallocated:   0,
+			wantDistinct:   wantSingleDistinct,
+			wantPacketSize: singlePacketSlabSize,
+			wantSmallSize:  wantSingleSmallSize,
+		},
+		{
+			name:           "batched unbounded",
+			batchSize:      2,
+			preallocated:   0,
+			wantDistinct:   true,
+			wantPacketSize: batchingSlabSize,
+			wantSmallSize:  smallPacketBufSize,
+		},
+		{
+			name:           "single bounded",
+			batchSize:      1,
+			preallocated:   1,
+			wantDistinct:   false,
+			wantPacketSize: singlePacketSlabSize,
+			wantSmallSize:  singlePacketSlabSize,
+		},
+		{
+			name:           "batched bounded",
+			batchSize:      2,
+			preallocated:   1,
+			wantDistinct:   false,
+			wantPacketSize: batchingSlabSize,
+			wantSmallSize:  batchingSlabSize,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			device := new(Device)
+			device.config.preallocatedBuffersPerPool = tt.preallocated
+			device.net.bind = &fakeBindSized{size: tt.batchSize}
+			device.tun.device = &fakeTUNDeviceSized{size: tt.batchSize}
+			device.PopulatePools()
+
+			if got := device.hasDistinctSmallPacketBufPool(); got != tt.wantDistinct {
+				t.Fatalf("distinct small pool = %v, want %v", got, tt.wantDistinct)
+			}
+
+			buf := device.getPacketBuf()
+			gotPacketSize := len(buf.slab)
+			buf.decRef()
+
+			buf = device.getSmallPacketBuf()
+			gotSmallSize := len(buf.slab)
+			buf.decRef()
+
+			if gotPacketSize != tt.wantPacketSize {
+				t.Errorf("packet buffer size = %d, want %d",
+					gotPacketSize, tt.wantPacketSize)
+			}
+			if gotSmallSize != tt.wantSmallSize {
+				t.Errorf("small packet buffer size = %d, want %d",
+					gotSmallSize, tt.wantSmallSize)
+			}
+		})
+	}
+}
+
+func TestMessageInitiationMetrics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var initial, retry expvar.Int
+		dev := newSynctestCapableDevice(t,
+			WithMetrics(Metrics{
+				MessageInitiationTXAttemptInitial: &initial,
+				MessageInitiationTXAttemptRetry:   &retry,
+			}),
+		)
+
+		sk, err := newPrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		peer, err := dev.NewPeer(sk.publicKey())
+		if err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+
+		// We intentionally leave the [Device] down, to suppress timer-triggered
+		// handshakes.
+
+		// We intentionally leave [Peer.endpoint] unconfigured, so that
+		// [Peer.SendBuffers] returns an error. We expect network send attempt
+		// counters to still increment.
+		if err := peer.SendHandshakeInitiation(false); err == nil {
+			t.Fatal("expected send error")
+		}
+		if got := initial.Value(); got != 1 {
+			t.Fatalf("initial attempts = %d, want 1", got)
+		}
+		if got := retry.Value(); got != 0 {
+			t.Fatalf("retry attempts = %d, want 0", got)
+		}
+
+		// Since we didn't advance the clock, SendHandshakeInitiation should
+		// suppress due to [RekeyTimeout], and counters should remain unchanged.
+		if err := peer.SendHandshakeInitiation(false); err != nil {
+			t.Fatal(err)
+		}
+		if got := initial.Value(); got != 1 {
+			t.Fatalf("initial attempts after suppression = %d, want 1", got)
+		}
+		if got := retry.Value(); got != 0 {
+			t.Fatalf("retry attempts after suppression = %d, want 0", got)
+		}
+
+		time.Sleep(RekeyTimeout)
+
+		if err := peer.SendHandshakeInitiation(true); err == nil {
+			t.Fatal("expected send error")
+		}
+		if got := initial.Value(); got != 1 {
+			t.Fatalf("initial attempts = %d, want 1", got)
+		}
+		if got := retry.Value(); got != 1 {
+			t.Fatalf("retry attempts = %d, want 1", got)
+		}
+	})
+}
+
+func TestHandshakeMetrics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var initial, retry, response, initiatorCompleted, responderCompleted expvar.Int
+		pair := genTestPair(t, false, WithMetrics(Metrics{
+			MessageInitiationTXAttemptInitial: &initial,
+			MessageInitiationTXAttemptRetry:   &retry,
+			MessageResponseTXAttempt:          &response,
+			HandshakeInitiatorCompleted:       &initiatorCompleted,
+			HandshakeResponderCompleted:       &responderCompleted,
+		}))
+
+		pair.Send(t, Ping, nil)
+		// pair.Send returns only after the encrypted packet crosses the tunnel,
+		// so the handshake must have completed. Within the synctest bubble, the
+		// handshake runs without advancing fake time, so no initiation retry
+		// can race with the assertions below.
+		metricAssertions := []struct {
+			name    string
+			counter *expvar.Int
+			want    int64
+		}{
+			{"initial attempts", &initial, 1},
+			{"retry attempts", &retry, 0},
+			{"response attempts", &response, 1},
+			{"initiator completions", &initiatorCompleted, 1},
+			{"responder completions", &responderCompleted, 1},
+		}
+		for _, tt := range metricAssertions {
+			if got := tt.counter.Value(); got != tt.want {
+				t.Errorf("%s = %d, want %d", tt.name, got, tt.want)
+			}
+		}
+	})
 }
