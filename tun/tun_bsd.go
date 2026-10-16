@@ -1,4 +1,4 @@
-//go:build freebsd || openbsd || darwin
+//go:build freebsd || openbsd || darwin || solaris || illumos
 
 /* SPDX-License-Identifier: MIT
  *

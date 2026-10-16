@@ -141,7 +141,7 @@ func tunDestroy(name string) error {
 	return nil
 }
 
-func CreateTUN(name string, mtu int) (Device, error) {
+func CreateTUN(name string, mtu int, _ ...Option) (Device, error) {
 	ppa := -1
 	if name != "tun" {
 		_, err := fmt.Sscanf(name, "tun%d", &ppa)
@@ -247,6 +247,10 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 	return tun, nil
 }
 
+func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
+	return createTUNFromFilesNoMQ(files, mtu)
+}
+
 func (tun *NativeTun) configureSTREAMS() error {
 	// get back the ppa number from the name
 	var ppa int
@@ -310,16 +314,17 @@ func (tun *NativeTun) Events() <-chan Event {
 	return tun.events
 }
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(slab []byte, packets []ReadPacket) (int, error) {
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		_, read, _, err := unix.Getmsg(tun.fd, nil, bufs[0][offset:])
+		_, read, _, err := unix.Getmsg(tun.fd, nil, slab[ReadPacketSpacing:len(slab)-ReadPacketSpacing])
 		if err != nil {
 			return 0, err
 		}
-		sizes[0] = len(read)
+		packets[0].Offset = ReadPacketSpacing
+		packets[0].Size = len(read)
 		return 1, nil
 	}
 }
@@ -385,6 +390,6 @@ func (tun *NativeTun) MTU() (int, error) {
 	return int(l.GetLifruUint()), nil
 }
 
-func (tun *NativeTun) BatchSize() (int) {
+func (tun *NativeTun) BatchSize() int {
 	return 1
 }
